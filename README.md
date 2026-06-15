@@ -25,7 +25,7 @@ dotf install
 
 ### From binary (recommended)
 
-Download the latest release from [GitHub Releases](https://github.com/codebuff/dotf/releases).
+Download the latest release from [GitHub Releases](https://github.com/RicknotDev/dotf/releases/tag/v0.3.0).
 
 ```bash
 chmod +x dotf
