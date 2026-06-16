@@ -42,7 +42,10 @@ Examples:
 		return nil
 	}
 
-	repoRoot, _ := os.Getwd()
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("cannot determine working directory: %w", err)
+	}
 	remaining := fs.Args()
 
 	if len(remaining) < 1 {
@@ -143,15 +146,24 @@ func inspectLayer(repoRoot string, args []string) error {
 	fmt.Println("Files:")
 
 	count := 0
-	filepath.WalkDir(layerDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	walkErr := filepath.WalkDir(layerDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(layerDir, path)
+		if d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(layerDir, path)
+		if relErr != nil {
+			return relErr
+		}
 		fmt.Printf("  %s\n", rel)
 		count++
 		return nil
 	})
+	if walkErr != nil {
+		return walkErr
+	}
 
 	fmt.Println()
 	fmt.Printf("Total: %d files\n", count)
@@ -212,11 +224,18 @@ func inspectOverrides(repoRoot string) error {
 	fmt.Println("All resolved files:")
 	allFiles := make(map[string][]string)
 	for _, l := range result.Layers {
+		// Best-effort collection of files
 		filepath.WalkDir(l.DirPath, func(path string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return err
+			if err != nil {
+				return nil
 			}
-			rel, _ := filepath.Rel(l.DirPath, path)
+			if d.IsDir() {
+				return nil
+			}
+			rel, relErr := filepath.Rel(l.DirPath, path)
+			if relErr != nil {
+				return nil
+			}
 			allFiles[rel] = append(allFiles[rel], l.Path())
 			return nil
 		})

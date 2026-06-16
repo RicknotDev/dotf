@@ -235,7 +235,10 @@ func (m *Manager) prune(relativePath string) {
 
 	// Remove oldest backups beyond the limit
 	for i := m.maxKeep; i < len(backups); i++ {
-		os.Remove(backups[i].BackupPath)
+		if err := os.Remove(backups[i].BackupPath); err != nil {
+			// Log but don't fail the backup operation due to prune failure
+			fmt.Fprintf(os.Stderr, "warning: could not prune old backup %s: %v\n", backups[i].BackupPath, err)
+		}
 	}
 }
 

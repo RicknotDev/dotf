@@ -146,6 +146,12 @@ func (m *Manager) RecordFile(relativePath, layer, fileType, source string) {
 	}
 }
 
+// ClearFiles removes all installed files from state.
+func (m *Manager) ClearFiles() {
+	m.dirty = true
+	m.state.InstalledFiles = make(map[string]FileRef)
+}
+
 // RecordBackup records a backup.
 func (m *Manager) RecordBackup(backupName, originalPath string) {
 	m.dirty = true

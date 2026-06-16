@@ -49,7 +49,11 @@ Options:
 		return nil
 	}
 
-	repoRoot, _ := os.Getwd()
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot determine working directory: %v\n", err)
+		repoRoot = "."
+	}
 
 	fmt.Println("DOTF Doctor")
 	fmt.Println("===========")
@@ -231,6 +235,11 @@ Options:
 		fmt.Println()
 	} else {
 		fmt.Println("All checks passed.")
+	}
+
+	// Return non-zero exit code if issues found (used by scripts)
+	if issues > 0 {
+		return fmt.Errorf("%d issue(s) found", issues)
 	}
 
 	return nil

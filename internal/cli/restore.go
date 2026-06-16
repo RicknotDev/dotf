@@ -62,7 +62,9 @@ Examples:
 			fmt.Fprintln(os.Stderr, "Restore failed. Rolling back...")
 			tx.Rollback()
 		} else {
-			tx.Commit()
+			if commitErr := tx.Commit(); commitErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: transaction commit failed: %v\n", commitErr)
+			}
 		}
 	}()
 

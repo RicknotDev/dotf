@@ -106,7 +106,9 @@ func (tx *Transaction) flushJournal() {
 	if err := os.WriteFile(tmpPath, []byte(data.String()), 0644); err != nil {
 		return // best effort
 	}
-	os.Rename(tmpPath, jPath)
+	if err := os.Rename(tmpPath, jPath); err != nil {
+		os.Remove(tmpPath) // clean up temp file on rename failure
+	}
 }
 
 // Symlink performs an atomic symlink creation within the transaction.

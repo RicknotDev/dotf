@@ -92,7 +92,10 @@ func Destroy(s *Secret) error {
 // decryptAge decrypts using age identity files.
 func decryptAge(s *Secret) error {
 	// Look for age identity in ~/.config/dotf/keys/
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("cannot determine home directory: %w", err)
+	}
 	keyDir := filepath.Join(homeDir, ".config", "dotf", "keys")
 	keys, err := filepath.Glob(filepath.Join(keyDir, "*.age"))
 	if err != nil || len(keys) == 0 {

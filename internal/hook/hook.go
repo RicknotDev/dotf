@@ -117,10 +117,27 @@ func Execute(h Hook, logFile string, allowHooks bool) *ExecutionResult {
 	cmd.Stderr = &output
 
 	// Set environment with DOTF-specific variables
+	// Detect DOTF_HOME from environment or use home directory
+	dotfHome := os.Getenv("DOTF_HOME")
+	if dotfHome == "" {
+		if hd, err := os.UserHomeDir(); err == nil {
+			dotfHome = hd
+		}
+	}
+	dotfDir := os.Getenv("DOTF_DIR")
+	if dotfDir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			dotfDir = wd
+		}
+	}
+
 	cmd.Env = append(os.Environ(),
 		"DOTF_HOOK=true",
 		fmt.Sprintf("DOTF_HOOK_TYPE=%s", h.Type),
 		fmt.Sprintf("DOTF_HOOK_LAYER=%s", h.Layer),
+		fmt.Sprintf("DOTF_PROFILE=%s", os.Getenv("DOTF_PROFILE")),
+		fmt.Sprintf("DOTF_DIR=%s", dotfDir),
+		fmt.Sprintf("DOTF_HOME=%s", dotfHome),
 	)
 
 	err := cmd.Run()
@@ -144,7 +161,9 @@ func Execute(h Hook, logFile string, allowHooks bool) *ExecutionResult {
 	if logFile != "" {
 		f, fErr := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if fErr == nil {
-			f.WriteString(logEntry)
+			if _, writeErr := f.WriteString(logEntry); writeErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not write to hook log: %v\n", writeErr)
+			}
 			f.Close()
 		}
 	}
