@@ -72,6 +72,16 @@ Options:
 		issues++
 	} else {
 		fmt.Println("OK")
+		// Check for stale lock that needs removal
+		if *fix || *unlock || *emergency {
+			if lock.LockHolder(stateDir) != "unknown" {
+				if err := lock.ForceRelease(stateDir); err != nil {
+					fmt.Printf("  Cannot release stale lock: %v\n", err)
+				} else {
+					fmt.Println("  Stale lock released.")
+				}
+			}
+		}
 	}
 
 	// 2. Check state integrity
@@ -112,7 +122,7 @@ Options:
 	// 5. Check backup integrity
 	if *verifyBackups || *emergency {
 		fmt.Print("Verifying backup integrity... ")
-		backupMgr, err := backup.NewManager(filepath.Join(stateDir, "dotf", "backups"))
+		backupMgr, err := backup.NewManager(filepath.Join(stateDir, "backups"))
 		if err != nil {
 			fmt.Printf("ERROR: %v\n", err)
 		} else {
@@ -138,7 +148,7 @@ Options:
 		}
 	}
 
-	// 6. Check symlinks
+	// 6. Check symlinks using state (fast: only checks known installed files)
 	fmt.Print("Checking installed symlinks... ")
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -146,35 +156,42 @@ Options:
 		issues++
 		return nil
 	}
-	count := 0
-	broken := 0
-	filepath.WalkDir(homeDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		info, err := os.Lstat(path)
-		if err != nil || info.Mode()&os.ModeSymlink == 0 {
-			return nil
-		}
-		target, err := os.Readlink(path)
-		if err != nil {
-			return nil
-		}
-		if strings.HasPrefix(target, repoRoot) {
-			_, err := os.Stat(target)
-			if err != nil {
-				fmt.Printf("  BROKEN: %s -> %s\n", path, target)
+
+	// Use state to get known installed files instead of walking entire $HOME
+	if sm != nil {
+		s := sm.GetState()
+		count := 0
+		broken := 0
+		for relPath := range s.InstalledFiles {
+			path := filepath.Join(homeDir, relPath)
+			info, lErr := os.Lstat(path)
+			if lErr != nil {
+				// File doesn't exist — might have been removed
+				fmt.Printf("  MISSING: %s\n", path)
 				issues++
-				broken++
+				count++
+				continue
 			}
-			count++
+			if info.Mode()&os.ModeSymlink == 0 {
+				continue // not a symlink (was replaced)
+			}
+			target, rErr := os.Readlink(path)
+			if rErr != nil {
+				continue
+			}
+			if strings.HasPrefix(target, repoRoot) {
+				if _, sErr := os.Stat(target); sErr != nil {
+					fmt.Printf("  BROKEN: %s -> %s\n", path, target)
+					issues++
+					broken++
+				}
+				count++
+			}
 		}
-		return nil
-	})
-	fmt.Printf("%d symlinks, %d broken\n", count, broken)
+		fmt.Printf("%d symlinks, %d broken\n", count, broken)
+	} else {
+		fmt.Println("state unavailable (skip)")
+	}
 
 	// 7. Check package availability
 	if *checkPackages || *emergency {

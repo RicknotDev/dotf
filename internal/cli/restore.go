@@ -66,7 +66,7 @@ Examples:
 		}
 	}()
 
-	backupMgr, err := backup.NewManager(filepath.Join(stateDir, "dotf", "backups"))
+	backupMgr, err := backup.NewManager(filepath.Join(stateDir, "backups"))
 	if err != nil {
 		return fmt.Errorf("cannot open backups: %w", err)
 	}

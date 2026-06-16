@@ -9,12 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
-
-// StateDir is the directory for DOTF state data.
-const StateDir = "dotf"
 
 // State represents the full DOTF state.
 type State struct {
@@ -51,13 +47,14 @@ type Manager struct {
 }
 
 // NewManager creates a new state manager.
+// baseDir should be the DOTF state directory (e.g., ~/.local/state/dotf).
 func NewManager(baseDir string) (*Manager, error) {
-	stateDir := filepath.Join(baseDir, StateDir)
+	stateDir := baseDir
 	if err := os.MkdirAll(stateDir, 0755); err != nil {
 		return nil, fmt.Errorf("cannot create state directory: %w", err)
 	}
 
-	backupDir := filepath.Join(baseDir, StateDir, "backups")
+	backupDir := filepath.Join(baseDir, "backups")
 	if err := os.MkdirAll(backupDir, 0755); err != nil {
 		return nil, fmt.Errorf("cannot create backup directory: %w", err)
 	}
@@ -149,12 +146,6 @@ func (m *Manager) RecordFile(relativePath, layer, fileType, source string) {
 	}
 }
 
-// RemoveFile removes a file from the installed state.
-func (m *Manager) RemoveFile(relativePath string) {
-	m.dirty = true
-	delete(m.state.InstalledFiles, relativePath)
-}
-
 // RecordBackup records a backup.
 func (m *Manager) RecordBackup(backupName, originalPath string) {
 	m.dirty = true
@@ -175,67 +166,6 @@ func (m *Manager) GetState() State {
 	return *m.state
 }
 
-// RebuildFromFilesystem scans the home directory for DOTF-installed files.
-// This is the self-healing mechanism — if state is corrupt, rebuild it.
-func (m *Manager) RebuildFromFilesystem(repoRoot, homeDir string) error {
-	newState := &State{
-		Version:        1,
-		Repository:     repoRoot,
-		InstalledFiles: make(map[string]FileRef),
-		BackupManifest: make(map[string]Backup),
-	}
-
-	// Start with existing backup manifest (backups are independent)
-	newState.BackupManifest = m.state.BackupManifest
-
-	// Walk home directory looking for symlinks pointing to the repo
-	err := filepath.WalkDir(homeDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip inaccessible paths
-		}
-		if d.IsDir() {
-			return nil
-		}
-
-		// Check if it's a symlink
-		info, err := os.Lstat(path)
-		if err != nil || info.Mode()&os.ModeSymlink == 0 {
-			return nil
-		}
-
-		target, err := os.Readlink(path)
-		if err != nil {
-			return nil
-		}
-
-		// Check if symlink points to our repository
-		absTarget, err := filepath.Abs(target)
-		if err != nil {
-			return nil
-		}
-
-		rel, err := filepath.Rel(repoRoot, absTarget)
-		if err != nil || strings.HasPrefix(rel, "..") {
-			return nil
-		}
-
-		// This is one of our symlinks
-		homeRel, _ := filepath.Rel(homeDir, path)
-		newState.InstalledFiles[homeRel] = FileRef{
-			Type:   "symlink",
-			Source: absTarget,
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("cannot walk filesystem: %w", err)
-	}
-
-	m.state = newState
-	m.dirty = true
-	return m.Save()
-}
-
 // VerifyBackupIntegrity checks all backup checksums.
 func (m *Manager) VerifyBackupIntegrity() ([]string, error) {
 	var corrupted []string
@@ -253,16 +183,6 @@ func (m *Manager) VerifyBackupIntegrity() ([]string, error) {
 	}
 
 	return corrupted, nil
-}
-
-// StateDir returns the state directory path.
-func (m *Manager) StateDir() string {
-	return m.stateDir
-}
-
-// BackupDir returns the backup directory path.
-func (m *Manager) BackupDir() string {
-	return m.backupDir
 }
 
 // computeChecksum returns the SHA-256 checksum of a file.

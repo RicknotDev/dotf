@@ -18,7 +18,7 @@ func main() {
 	args := os.Args[2:]
 
 	// Determine state directory (XDG compliant)
-	stateDir := filepath.Join(os.Getenv("HOME"), ".local", "state", "dotf")
+	stateDir := xdgStateDir()
 
 	switch cmd {
 	case "install":
@@ -65,4 +65,18 @@ Commands:
 
 Run 'dotf <command> --help' for detailed usage.
 `)
+}
+
+// xdgStateDir returns the DOTF state directory following the XDG Base Directory spec.
+// Uses $XDG_STATE_HOME/dotf if set, otherwise falls back to ~/.local/state/dotf.
+func xdgStateDir() string {
+	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
+		return filepath.Join(xdg, "dotf")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Last resort fallback
+		return filepath.Join("/tmp", "dotf-state")
+	}
+	return filepath.Join(home, ".local", "state", "dotf")
 }

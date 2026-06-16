@@ -242,7 +242,7 @@ func inspectOverrides(repoRoot string) error {
 }
 
 func inspectBackup(stateDir string) error {
-	backupDir := filepath.Join(stateDir, "dotf", "backups")
+	backupDir := filepath.Join(stateDir, "backups")
 	entries, err := os.ReadDir(backupDir)
 	if err != nil {
 		if os.IsNotExist(err) {

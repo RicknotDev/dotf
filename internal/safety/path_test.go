@@ -130,18 +130,6 @@ func TestIsSensitivePath(t *testing.T) {
 	}
 }
 
-func TestValidateSymlinkTarget(t *testing.T) {
-	result := ValidateSymlinkTarget("/etc/passwd")
-	if result.Safe {
-		t.Fatal("expected unsafe for sensitive symlink target")
-	}
-
-	result = ValidateSymlinkTarget("/home/user/.config/kitty/kitty.conf")
-	if !result.Safe {
-		t.Fatalf("expected safe, got: %s", result.Reason)
-	}
-}
-
 func TestMaxFilePath(t *testing.T) {
 	home := "/"
 	longPath := string(make([]byte, MaxFilePath+1))

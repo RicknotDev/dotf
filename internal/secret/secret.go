@@ -20,11 +20,12 @@ type Secret struct {
 }
 
 // DiscoverSecrets finds all encrypted secret files in resolved layers.
-func DiscoverSecrets(repoRoot string, layerPaths []string) []Secret {
+// layersDir should be the absolute path to the layers/ directory (e.g., repoRoot/layers).
+func DiscoverSecrets(layersDir string, layerPaths []string) []Secret {
 	var secrets []Secret
 
 	for _, layer := range layerPaths {
-		secretsDir := filepath.Join(repoRoot, layer, "secrets")
+		secretsDir := filepath.Join(layersDir, layer, "secrets")
 		entries, err := os.ReadDir(secretsDir)
 		if err != nil {
 			continue

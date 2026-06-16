@@ -1,10 +1,10 @@
-# DOTF — Zero-Configuration Linux Setup Runtime
+# DOTF — Zero-Configuration Linux Dotfiles Runtime
 
 DOTF automatically detects your Linux environment and installs the correct configuration files from a layered repository. No manual profile selection, no symlink management, no documentation required.
 
 ```bash
-git clone <repository>
-cd <repository>
+git clone https://github.com/RicknotDev/dotf.git
+cd dotf
 dotf install
 ```
 
@@ -12,7 +12,7 @@ dotf install
 
 ### From binary (recommended)
 
-Download the latest release from [GitHub Releases](https://github.com/RicknotDev/dotf/releases/tag/v0.3.0).
+Download the latest release from [GitHub Releases](https://github.com/RicknotDev/dotf/releases).
 
 ```bash
 chmod +x dotf
@@ -22,11 +22,12 @@ sudo mv dotf /usr/local/bin/
 ### From source
 
 ```bash
-git clone https://github.com/codebuff/dotf.git
+git clone https://github.com/RicknotDev/dotf.git
 cd dotf
 make build
 sudo make install
 ```
+
 ## Quick Start
 
 ```bash

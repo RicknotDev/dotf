@@ -219,7 +219,7 @@ configuration layers. No manual profile selection needed.
 		layerDirs[i] = l.DirPath
 	}
 	hooks := hook.DiscoverHooks(layerDirs)
-	hookLogFile := filepath.Join(stateDir, "dotf", "hooks.log")
+	hookLogFile := filepath.Join(stateDir, "hooks.log")
 	hookResults := hook.ExecuteAll(hooks, hook.PreInstall, hookLogFile, *allowHooks)
 	for _, hr := range hookResults {
 		if !hr.Success {
@@ -237,7 +237,7 @@ configuration layers. No manual profile selection needed.
 	}
 
 	// --- BACKUP ---
-	backupMgr, err := backup.NewManager(filepath.Join(stateDir, "dotf", "backups"))
+	backupMgr, err := backup.NewManager(filepath.Join(stateDir, "backups"))
 	if err != nil {
 		installErr = err
 		return fmt.Errorf("cannot initialize backups: %w", err)
@@ -272,7 +272,7 @@ configuration layers. No manual profile selection needed.
 	}
 
 	// --- SECRETS ---
-	secrets := secret.DiscoverSecrets(repoRoot, getLayerPaths(result.Layers))
+	secrets := secret.DiscoverSecrets(layersDir, getLayerPaths(result.Layers))
 	if len(secrets) > 0 {
 		fmt.Fprintf(os.Stderr, "Secrets found: %d\n", len(secrets))
 		for _, s := range secrets {
@@ -371,6 +371,7 @@ walkLayers:
 					if b != nil {
 						stats.BackedUp++
 						fmt.Fprintf(os.Stderr, "  backed up %s\n", rel)
+						sm.RecordBackup(b.BackupPath, rel)
 					}
 				}
 			}

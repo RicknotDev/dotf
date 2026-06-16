@@ -158,27 +158,6 @@ func ValidateTargetPath(homeDir, relativePath string) *PathValidationResult {
 	}
 }
 
-// ValidateSymlinkTarget checks that a symlink target is safe.
-func ValidateSymlinkTarget(target string) *PathValidationResult {
-	clean := filepath.Clean(target)
-	abs, err := filepath.Abs(clean)
-	if err != nil {
-		return fail("cannot resolve target: %v", err)
-	}
-
-	// Block absolute symlinks that point to sensitive paths
-	for _, sp := range sensitivePaths {
-		if abs == sp || strings.HasPrefix(abs, sp+"/") {
-			return fail("symlink points to sensitive path: %s", sp)
-		}
-	}
-
-	return &PathValidationResult{
-		Safe:       true,
-		Normalized: abs,
-	}
-}
-
 // IsSensitivePath checks if a path is considered sensitive.
 func IsSensitivePath(path string) bool {
 	abs, err := filepath.Abs(filepath.Clean(path))

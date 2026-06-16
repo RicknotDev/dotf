@@ -21,7 +21,6 @@ const (
 	OpMkdir   OpType = "MKDIR"
 	OpRemove  OpType = "REMOVE"
 	OpBackup  OpType = "BACKUP"
-	OpRestore OpType = "RESTORE"
 )
 
 // Operation represents a single logged operation.
@@ -146,29 +145,6 @@ func (tx *Transaction) Copy(source, target string) error {
 		os.Remove(tmpPath)
 		tx.Rollback()
 		return fmt.Errorf("rename %s -> %s: %w", tmpPath, target, err)
-	}
-
-	tx.commitOperation(idx)
-	return nil
-}
-
-// Backup creates a backup of a file before it's modified, within the transaction.
-func (tx *Transaction) Backup(originalPath, backupPath string) error {
-	idx := len(tx.journal)
-	tx.logOperation(OpBackup, originalPath, backupPath)
-
-	// Ensure backup directory exists
-	if err := os.MkdirAll(filepath.Dir(backupPath), 0755); err != nil {
-		return fmt.Errorf("mkdir backup dir: %w", err)
-	}
-
-	data, err := os.ReadFile(originalPath)
-	if err != nil {
-		return fmt.Errorf("read original for backup: %w", err)
-	}
-
-	if err := os.WriteFile(backupPath, data, 0644); err != nil {
-		return fmt.Errorf("write backup: %w", err)
 	}
 
 	tx.commitOperation(idx)
