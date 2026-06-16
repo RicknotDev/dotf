@@ -140,7 +140,12 @@ Options:
 
 	// 6. Check symlinks
 	fmt.Print("Checking installed symlinks... ")
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("ERROR: cannot determine home directory: %v\n", err)
+		issues++
+		return nil
+	}
 	count := 0
 	broken := 0
 	filepath.WalkDir(homeDir, func(path string, d os.DirEntry, err error) error {

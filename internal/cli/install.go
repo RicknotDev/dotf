@@ -170,7 +170,11 @@ configuration layers. No manual profile selection needed.
 
 	// --- DETECT ---
 	p := detect.Detect()
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		installErr = err
+		return fmt.Errorf("cannot determine home directory: %w", err)
+	}
 
 	// Print detection
 	fmt.Fprintln(os.Stderr, "Detected:")
@@ -281,7 +285,11 @@ configuration layers. No manual profile selection needed.
 					continue
 				}
 				fmt.Fprintf(os.Stderr, "  decrypted %s\n", s.Name)
-				defer secret.Destroy(&s)
+				// Destroy each secret immediately after decryption display
+				// (not deferred — defer in a loop would accumulate all destroys until function return)
+				if err := secret.Destroy(&s); err != nil {
+					fmt.Fprintf(os.Stderr, "  warning: cannot destroy %s: %v\n", s.Name, err)
+				}
 			}
 		}
 		fmt.Fprintln(os.Stderr)

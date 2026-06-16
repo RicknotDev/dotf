@@ -96,7 +96,10 @@ func decryptAge(s *Secret) error {
 	keys, err := filepath.Glob(filepath.Join(keyDir, "*.age"))
 	if err != nil || len(keys) == 0 {
 		// Also check ~/.age/ and ~/.config/age/
-		keys, _ = filepath.Glob(filepath.Join(homeDir, ".config", "age", "*.txt"))
+		altKeys, altErr := filepath.Glob(filepath.Join(homeDir, ".config", "age", "*.txt"))
+		if altErr == nil && len(altKeys) > 0 {
+			keys = altKeys
+		}
 	}
 
 	if len(keys) == 0 {

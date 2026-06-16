@@ -42,10 +42,11 @@ func NewManager(backupDir string) (*Manager, error) {
 }
 
 // backupName generates a unique, timestamped backup filename.
+// Uses UnixNano to guarantee uniqueness even within the same second.
 func backupName(relativePath string) string {
-	timestamp := time.Now().Format("20060102-150405")
+	timestamp := time.Now().UnixNano()
 	safeName := strings.ReplaceAll(relativePath, "/", "__")
-	return fmt.Sprintf("%s.%s.bak", safeName, timestamp)
+	return fmt.Sprintf("%s.%d.bak", safeName, timestamp)
 }
 
 // Create creates a backup of a file before it's modified.
@@ -111,11 +112,14 @@ func (m *Manager) List(relativePath string) ([]Backup, error) {
 
 		fullPath := filepath.Join(m.backupDir, entry.Name())
 		checksum := computeChecksum(fullPath)
-		// Extract timestamp from filename
-		parts := strings.SplitN(entry.Name(), ".", 3)
+
+		// Extract timestamp: filename format is "safePath.TIMESTAMP.bak"
+		// Use the last dot before .bak as the separator (safeName may contain dots like .zshrc)
+		name := strings.TrimSuffix(entry.Name(), ".bak")
+		lastDot := strings.LastIndex(name, ".")
 		created := ""
-		if len(parts) >= 3 {
-			created = parts[1] // "20060102-150405"
+		if lastDot >= 0 {
+			created = name[lastDot+1:] // timestamp after the last dot
 		}
 
 		backups = append(backups, Backup{

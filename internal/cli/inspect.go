@@ -98,7 +98,11 @@ func inspectFile(repoRoot string, args []string) error {
 	}
 
 	// Check if installed
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Println("  (cannot determine home directory)")
+		return nil
+	}
 	targetPath := filepath.Join(homeDir, filePath)
 	if info, err := os.Lstat(targetPath); err == nil {
 		fmt.Println()
