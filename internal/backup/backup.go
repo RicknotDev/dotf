@@ -51,8 +51,8 @@ func backupName(relativePath string) string {
 // Create creates a backup of a file before it's modified.
 // The backup is written to the backup directory with a timestamp.
 func (m *Manager) Create(relativePath, fullPath string) (*Backup, error) {
-	// Verify the file exists
-	info, err := os.Stat(fullPath)
+	// Use Lstat first to detect symlinks (os.Stat follows them)
+	lstatInfo, err := os.Lstat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil // nothing to back up
@@ -61,7 +61,7 @@ func (m *Manager) Create(relativePath, fullPath string) (*Backup, error) {
 	}
 
 	// Don't back up our own symlinks
-	if info.Mode()&os.ModeSymlink != 0 {
+	if lstatInfo.Mode()&os.ModeSymlink != 0 {
 		return nil, nil
 	}
 

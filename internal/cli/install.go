@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/codebuff/dotf/internal/layer"
 	"github.com/codebuff/dotf/internal/lock"
 	"github.com/codebuff/dotf/internal/pkg"
+	"github.com/codebuff/dotf/internal/reorganize"
 	"github.com/codebuff/dotf/internal/safety"
 	"github.com/codebuff/dotf/internal/secret"
 	"github.com/codebuff/dotf/internal/state"
@@ -28,6 +30,7 @@ func Install(args []string, stateDir string) error {
 	dryRun := fs.Bool("dry-run", false, "Print what would be done without doing it")
 	copyMode := fs.Bool("copy", false, "Copy files instead of creating symlinks")
 	allowHooks := fs.Bool("allow-hooks", false, "Allow hook execution")
+	reorganizeFlag := fs.Bool("reorganize", false, "Reorganize flat dotfiles into layers/ structure before installing")
 	help := fs.Bool("help", false, "Show help")
 
 	if err := fs.Parse(args); err != nil {
@@ -35,15 +38,19 @@ func Install(args []string, stateDir string) error {
 	}
 
 	if *help {
-		fmt.Fprint(os.Stderr, `Usage: dotf install [options]
+		fmt.Fprint(os.Stderr, `Usage: dotf install [options] [path]
 
 Install configured dotfiles to your home directory.
+
+Arguments:
+  path          Path to dotfiles directory or git repository URL
+                (defaults to current directory)
 
 Options:
   --dry-run       Print what would be done without installing anything
   --copy          Copy files instead of creating symlinks (useful for containers)
   --allow-hooks   Enable hook script execution (disabled by default)
-  --no-merge      Disable file merging (winner takes all)
+  --reorganize    Reorganize flat dotfiles into layers/ structure before installing
   --help          Show this help message
 
 DOTF automatically detects your environment and resolves the matching
@@ -52,23 +59,90 @@ configuration layers. No manual profile selection needed.
 		return nil
 	}
 
-	// Determine repository root
+	// Determine repository root (default: current directory)
 	repoRoot, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("cannot determine working directory: %w", err)
 	}
 
-	// Validate we're in a DOTF repository
+	// Check for positional path argument (local path or git URL)
+	if remaining := fs.Args(); len(remaining) > 0 {
+		pathArg := remaining[0]
+		if strings.Contains(pathArg, "://") || strings.HasPrefix(pathArg, "git@") {
+			// Git URL — clone to persistent directory under stateDir
+			// (symlinks will point here, so it must not be deleted)
+			repoCache := filepath.Join(stateDir, "repos")
+			if err := os.MkdirAll(repoCache, 0755); err != nil {
+				return fmt.Errorf("cannot create repo cache directory: %w", err)
+			}
+			// Derive a directory name from the URL
+			repoName := strings.ReplaceAll(strings.ReplaceAll(pathArg, "/", "_"), ":", "_")
+			cloneDir := filepath.Join(repoCache, repoName)
+
+			// Clone if not already cached
+			if _, err := os.Stat(cloneDir); os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "Cloning %s...\n", pathArg)
+				args := []string{"clone", "--depth", "1", pathArg, cloneDir}
+				if err := runCmd("git", args...); err != nil {
+					return fmt.Errorf("cannot clone repository: %w", err)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "Using cached clone: %s\n", cloneDir)
+			}
+			repoRoot = cloneDir
+		} else {
+			// Local path — resolve relative to current working directory
+			absPath, err := filepath.Abs(pathArg)
+			if err != nil {
+				return fmt.Errorf("cannot resolve path %s: %w", pathArg, err)
+			}
+			repoRoot = absPath
+		}
+	}
+
 	layersDir := filepath.Join(repoRoot, "layers")
+
+	// --- REORGANIZE ---
+	// Check if we need to reorganize a flat dotfiles structure into layers/
+	if reorganize.IsFlatStructure(repoRoot) {
+		if *reorganizeFlag {
+			fmt.Fprintln(os.Stderr, "Detected flat dotfiles structure. Reorganizing into layers/...")
+			result, err := reorganize.Analyze(repoRoot)
+			if err != nil {
+				return fmt.Errorf("cannot analyze structure: %w", err)
+			}
+			if !*dryRun {
+				if err := reorganize.Reorganize(repoRoot, result); err != nil {
+					return fmt.Errorf("reorganization failed: %w", err)
+				}
+			}
+			fmt.Fprint(os.Stderr, reorganize.FormatResult(result))
+		} else {
+			fmt.Fprintln(os.Stderr, "Detected flat dotfiles structure. Run with --reorganize to auto-convert to DOTF layers/ format.")
+		}
+	}
+
+	// Validate we're in a DOTF repository
 	if _, err := os.Stat(layersDir); os.IsNotExist(err) {
-		return fmt.Errorf("not a DOTF repository: no 'layers' directory found in %s\n\nMake sure you run 'dotf install' from the root of your dotfiles repository", repoRoot)
+		return fmt.Errorf("not a DOTF repository: no 'layers' directory found in %s\n\nMake sure you run 'dotf install' from the root of your dotfiles repository, or use --reorganize to auto-convert a flat dotfiles directory", repoRoot)
 	}
 
 	// --- SIGNAL HANDLER ---
-	// Set up signal handling for graceful abort
+	// Use a channel to signal abort without racing with the main goroutine
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
+
+	abort := make(chan struct{}, 1)
+	go func() {
+		select {
+		case sig := <-sigCh:
+			fmt.Fprintf(os.Stderr, "\nReceived %v. Aborting gracefully...\n", sig)
+			close(abort)
+		case <-abort:
+			// already aborted
+		}
+	}()
 
 	// --- LOCK ---
 	// Acquire lock to prevent concurrent operations
@@ -92,15 +166,6 @@ configuration layers. No manual profile selection needed.
 			fmt.Fprintln(os.Stderr, "\nInstallation failed. Rolling back...")
 			tx.Rollback()
 		}
-	}()
-
-	// Goroutine to handle signals
-	go func() {
-		sig := <-sigCh
-		fmt.Fprintf(os.Stderr, "\nReceived %v. Aborting...\n", sig)
-		installErr = fmt.Errorf("aborted by signal: %v", sig)
-		tx.Rollback()
-		os.Exit(1)
 	}()
 
 	// --- DETECT ---
@@ -177,7 +242,7 @@ configuration layers. No manual profile selection needed.
 	// --- PACKAGES ---
 	pm := pkg.DetectManager()
 	if pm != nil {
-		pkgFiles := pkg.FindPackageFiles(repoRoot, getLayerPaths(result.Layers))
+		pkgFiles := pkg.FindPackageFiles(layersDir, getLayerPaths(result.Layers))
 		if len(pkgFiles) > 0 {
 			fmt.Fprintf(os.Stderr, "Package manager: %s\n", pm.Name())
 			for _, pf := range pkgFiles {
@@ -207,7 +272,6 @@ configuration layers. No manual profile selection needed.
 	if len(secrets) > 0 {
 		fmt.Fprintf(os.Stderr, "Secrets found: %d\n", len(secrets))
 		for _, s := range secrets {
-			_ = s
 			fmt.Fprintf(os.Stderr, "  %s (%s)\n", s.Name, s.Method)
 		}
 		if !*dryRun {
@@ -307,6 +371,14 @@ walkLayers:
 			if err := os.MkdirAll(targetDir, 0755); err != nil {
 				stats.Errors = append(stats.Errors, fmt.Sprintf("mkdir %s: %v", targetDir, err))
 				return nil
+			}
+
+			// Check for abort signal before each operation
+			select {
+			case <-abort:
+				installErr = fmt.Errorf("aborted by signal")
+				return filepath.SkipAll
+			default:
 			}
 
 			// --- INSTALL ---
@@ -448,4 +520,12 @@ func isSymlink(path string) bool {
 		return false
 	}
 	return info.Mode()&os.ModeSymlink != 0
+}
+
+// runCmd runs a command with output to stderr.
+func runCmd(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }

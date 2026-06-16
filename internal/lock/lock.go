@@ -131,11 +131,18 @@ func isStaleLock(lockPath string) bool {
 	return false
 }
 
-// readLockHolder reads the PID from a lock file for error messages.
+// readLockHolder reads the PID and hostname from a lock file for error messages.
 func readLockHolder(lockPath string) string {
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		return "unknown"
 	}
-	return strings.TrimSpace(string(data))
+	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 3)
+	if len(lines) >= 2 {
+		return fmt.Sprintf("PID %s on %s", strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]))
+	}
+	if len(lines) >= 1 {
+		return fmt.Sprintf("PID %s", strings.TrimSpace(lines[0]))
+	}
+	return "unknown"
 }

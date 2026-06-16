@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/codebuff/dotf/internal/backup"
 	"github.com/codebuff/dotf/internal/detect"
@@ -141,6 +142,7 @@ Options:
 	fmt.Print("Checking installed symlinks... ")
 	homeDir, _ := os.UserHomeDir()
 	count := 0
+	broken := 0
 	filepath.WalkDir(homeDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -156,17 +158,18 @@ Options:
 		if err != nil {
 			return nil
 		}
-		if stringsHasPrefix(target, repoRoot) {
+		if strings.HasPrefix(target, repoRoot) {
 			_, err := os.Stat(target)
 			if err != nil {
 				fmt.Printf("  BROKEN: %s -> %s\n", path, target)
 				issues++
+				broken++
 			}
 			count++
 		}
 		return nil
 	})
-	fmt.Printf("%d symlinks, %d broken\n", count, 0) // We count broken inline
+	fmt.Printf("%d symlinks, %d broken\n", count, broken)
 
 	// 7. Check package availability
 	if *checkPackages || *emergency {
@@ -211,7 +214,4 @@ Options:
 	return nil
 }
 
-// stringsHasPrefix is a helper to avoid importing strings in the main CLI.
-func stringsHasPrefix(s, prefix string) bool {
-	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
-}
+

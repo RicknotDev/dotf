@@ -69,6 +69,7 @@ func LoadPackages(path string) ([]string, error) {
 }
 
 // FindPackageFiles finds all package list files in resolved layers.
+// layersDir should point to the layers/ directory (e.g., repoRoot/layers).
 func FindPackageFiles(layersDir string, layerPaths []string) []string {
 	var files []string
 	for _, layer := range layerPaths {

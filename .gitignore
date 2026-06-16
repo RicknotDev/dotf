@@ -28,3 +28,14 @@
 # OS files
 .DS_Store
 Thumbs.db
+
+# Coverage
+coverage.txt
+coverage.html
+
+# Personal dotfiles (separate repo)
+.dotfiles/
+
+# Temp files
+/tmp/
+

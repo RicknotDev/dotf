@@ -43,9 +43,10 @@ func DiscoverSecrets(repoRoot string, layerPaths []string) []Secret {
 			if strings.HasSuffix(name, ".age") {
 				method = "age"
 				displayName = strings.TrimSuffix(name, ".age")
-			} else if strings.HasSuffix(name, ".gpg") || strings.HasSuffix(name, ".gpg") {
+			} else if strings.HasSuffix(name, ".gpg") || strings.HasSuffix(name, ".asc") {
 				method = "gpg"
-				displayName = strings.TrimSuffix(strings.TrimSuffix(name, ".gpg"), ".gpg")
+				displayName = strings.TrimSuffix(name, ".gpg")
+				displayName = strings.TrimSuffix(displayName, ".asc")
 			} else {
 				continue
 			}

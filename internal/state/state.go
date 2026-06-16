@@ -158,7 +158,7 @@ func (m *Manager) RemoveFile(relativePath string) {
 // RecordBackup records a backup.
 func (m *Manager) RecordBackup(backupName, originalPath string) {
 	m.dirty = true
-	checksum := computeChecksum(backupName)
+	checksum := ""
 	if _, err := os.Stat(backupName); err == nil {
 		checksum = computeChecksum(backupName)
 	}
