@@ -14,11 +14,11 @@ func TestConflictRegularFile(t *testing.T) {
 	}
 
 	home := filepath.Join(dir, "home")
-	os.MkdirAll(home, 0755)
+	_ = os.MkdirAll(home, 0755)
 	target := filepath.Join(home, ".zshrc")
 
 	// Create a regular file (conflict)
-	os.WriteFile(target, []byte("Existing content"), 0644)
+	_ = os.WriteFile(target, []byte("Existing content"), 0644)
 
 	// Backup should succeed
 	b, err := m.Create(".zshrc", target)
@@ -77,13 +77,13 @@ func TestConflictSymlinkToOtherLocation(t *testing.T) {
 	}
 
 	home := filepath.Join(dir, "home")
-	os.MkdirAll(home, 0755)
+	_ = os.MkdirAll(home, 0755)
 
 	// Create a real file somewhere else
 	otherDir := filepath.Join(dir, "other")
-	os.MkdirAll(otherDir, 0755)
+	_ = os.MkdirAll(otherDir, 0755)
 	realFile := filepath.Join(otherDir, "real_config")
-	os.WriteFile(realFile, []byte("other config"), 0644)
+	_ = os.WriteFile(realFile, []byte("other config"), 0644)
 
 	// Create a symlink in "home" pointing to that other file
 	linkPath := filepath.Join(home, ".gitconfig")
@@ -110,13 +110,13 @@ func TestSymlinkParentDirCreation(t *testing.T) {
 	}
 
 	home := filepath.Join(dir, "home")
-	os.MkdirAll(home, 0755)
+	_ = os.MkdirAll(home, 0755)
 
 	// Create nested file
 	nestedDir := filepath.Join(home, ".config", "nvim")
-	os.MkdirAll(nestedDir, 0755)
+	_ = os.MkdirAll(nestedDir, 0755)
 	nestedFile := filepath.Join(nestedDir, "init.lua")
-	os.WriteFile(nestedFile, []byte("vim.opt.number=true"), 0644)
+	_ = os.WriteFile(nestedFile, []byte("vim.opt.number=true"), 0644)
 
 	// Backup should handle nested paths
 	b, err := m.Create(".config/nvim/init.lua", nestedFile)
@@ -141,11 +141,11 @@ func TestConflictFileWithSpaces(t *testing.T) {
 	}
 
 	home := filepath.Join(dir, "home")
-	os.MkdirAll(home, 0755)
+	_ = os.MkdirAll(home, 0755)
 	target := filepath.Join(home, "my config file.conf")
 
 	// Create file with spaces in name
-	os.WriteFile(target, []byte("config with spaces"), 0644)
+	_ = os.WriteFile(target, []byte("config with spaces"), 0644)
 
 	b, err := m.Create("my config file.conf", target)
 	if err != nil {
@@ -169,11 +169,11 @@ func TestConflictFileUnicode(t *testing.T) {
 	}
 
 	home := filepath.Join(dir, "home")
-	os.MkdirAll(home, 0755)
+	_ = os.MkdirAll(home, 0755)
 	target := filepath.Join(home, "应用程序.toml")
 
 	// Create file with unicode in name
-	os.WriteFile(target, []byte("unicode config"), 0644)
+	_ = os.WriteFile(target, []byte("unicode config"), 0644)
 
 	b, err := m.Create("应用程序.toml", target)
 	if err != nil {

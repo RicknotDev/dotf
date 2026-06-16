@@ -55,7 +55,7 @@ func TestIsFlatStructureWithLayersDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Write a file to make layers/ non-empty
-	os.WriteFile(filepath.Join(layersDir, "shell", "zsh", ".zshrc"), []byte("data"), 0644)
+	_ = os.WriteFile(filepath.Join(layersDir, "shell", "zsh", ".zshrc"), []byte("data"), 0644)
 
 	if IsFlatStructure(dir) {
 		t.Fatal("expected IsFlatStructure to return false when layers/ has content")
@@ -72,8 +72,8 @@ func TestIsFlatStructureEmpty(t *testing.T) {
 func TestIsFlatStructureOnlyHidden(t *testing.T) {
 	dir := t.TempDir()
 	// Create hidden directories (should be ignored)
-	os.MkdirAll(filepath.Join(dir, ".git"), 0755)
-	os.MkdirAll(filepath.Join(dir, ".config"), 0755)
+	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+	_ = os.MkdirAll(filepath.Join(dir, ".config"), 0755)
 
 	if IsFlatStructure(dir) {
 		t.Fatal("expected IsFlatStructure to return false with only hidden dirs")
@@ -175,7 +175,7 @@ func TestReorganizeIdempotent(t *testing.T) {
 func TestDetectLayerDirsCreated(t *testing.T) {
 	dir := setupFlatStructure(t)
 	result, _ := Analyze(dir)
-	Reorganize(dir, result)
+	_ = Reorganize(dir, result)
 
 	// Check that detection layer dirs were created
 	for _, layer := range []string{"distro/arch", "shell/bash", "device/desktop"} {
@@ -211,17 +211,17 @@ func TestCollectFiles(t *testing.T) {
 
 	// Create test files
 	files := map[string]string{
-		"a.txt":          "content a",
-		"sub/b.txt":      "content b",
-		".hidden":        "hidden",      // hidden files should be collected
-		".git/config":    "git config",   // .git should be skipped
-		"sub/.git/HEAD":  "ref",
+		"a.txt":         "content a",
+		"sub/b.txt":     "content b",
+		".hidden":       "hidden",     // hidden files should be collected
+		".git/config":   "git config", // .git should be skipped
+		"sub/.git/HEAD": "ref",
 	}
 
 	for path, content := range files {
 		fullPath := filepath.Join(dir, path)
-		os.MkdirAll(filepath.Dir(fullPath), 0755)
-		os.WriteFile(fullPath, []byte(content), 0644)
+		_ = os.MkdirAll(filepath.Dir(fullPath), 0755)
+		_ = os.WriteFile(fullPath, []byte(content), 0644)
 	}
 
 	collected := collectFiles(dir)
@@ -255,10 +255,10 @@ func TestCollectFiles(t *testing.T) {
 func TestCountFiles(t *testing.T) {
 	dir := t.TempDir()
 
-	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0644)
-	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("b"), 0644)
-	os.MkdirAll(filepath.Join(dir, ".git"), 0755)
-	os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "b.txt"), []byte("b"), 0644)
+	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+	_ = os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref"), 0644)
 
 	count := countFiles(dir)
 	if count != 2 {
@@ -275,7 +275,7 @@ func TestIsSubmodule(t *testing.T) {
 	}
 
 	// Directory with .git directory is a submodule
-	os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
 	if !isSubmodule(dir) {
 		t.Fatal("expected dir with .git/ to be a submodule")
 	}
@@ -286,11 +286,11 @@ func TestCopyDir(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "copied")
 
 	// Create source structure
-	os.MkdirAll(filepath.Join(src, "sub"), 0755)
-	os.WriteFile(filepath.Join(src, "a.txt"), []byte("a"), 0644)
-	os.WriteFile(filepath.Join(src, "sub", "b.txt"), []byte("b"), 0644)
-	os.MkdirAll(filepath.Join(src, ".git"), 0755)
-	os.WriteFile(filepath.Join(src, ".git", "HEAD"), []byte("ref"), 0644)
+	_ = os.MkdirAll(filepath.Join(src, "sub"), 0755)
+	_ = os.WriteFile(filepath.Join(src, "a.txt"), []byte("a"), 0644)
+	_ = os.WriteFile(filepath.Join(src, "sub", "b.txt"), []byte("b"), 0644)
+	_ = os.MkdirAll(filepath.Join(src, ".git"), 0755)
+	_ = os.WriteFile(filepath.Join(src, ".git", "HEAD"), []byte("ref"), 0644)
 
 	if err := copyDir(src, dst); err != nil {
 		t.Fatalf("copyDir() failed: %v", err)

@@ -9,10 +9,10 @@ import (
 
 // OutputConfig controls CLI output behavior.
 type OutputConfig struct {
-	JSON     bool
-	Quiet    bool
-	NoColor  bool
-	Filter   string // filter string for status, e.g., "profile:base" or "state:ok"
+	JSON    bool
+	Quiet   bool
+	NoColor bool
+	Filter  string // filter string for status, e.g., "profile:base" or "state:ok"
 }
 
 // ParseGlobalFlags parses global flags from args and returns remaining args.
@@ -78,8 +78,8 @@ func (c OutputConfig) PrintErr(format string, args ...interface{}) {
 	if c.JSON {
 		// In JSON mode, errors are output as JSON on stderr
 		errOutput := map[string]interface{}{
-			"error":   msg,
-			"level":   "error",
+			"error": msg,
+			"level": "error",
 		}
 		b, _ := json.Marshal(errOutput)
 		fmt.Fprintln(os.Stderr, string(b))

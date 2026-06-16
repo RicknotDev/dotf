@@ -88,11 +88,11 @@ Examples:
 	if *diff || *dryRun {
 		if cfg.JSON {
 			dryRunResult := map[string]interface{}{
-				"mode":       "preview",
-				"layers":     getLayerPaths(result.Layers),
+				"mode":        "preview",
+				"layers":      getLayerPaths(result.Layers),
 				"layer_count": len(result.Layers),
 				"has_config":  dotfCfg != nil,
-				"dry_run":    *dryRun,
+				"dry_run":     *dryRun,
 			}
 			if dotfCfg != nil {
 				dryRunResult["profile"] = dotfCfg.Profile

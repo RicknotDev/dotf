@@ -21,8 +21,8 @@ func TestInstallHelp(t *testing.T) {
 func TestInstallDryRun(t *testing.T) {
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
@@ -37,7 +37,7 @@ func TestInstallDryRun(t *testing.T) {
 	os.Stderr = oldStderr
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "Detected:") {
@@ -55,8 +55,8 @@ func TestInstallWithoutLayers(t *testing.T) {
 	dir := t.TempDir()
 	// No layers/ directory
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	err := Install([]string{}, t.TempDir())
 	if err == nil {
@@ -83,7 +83,7 @@ func TestInstallWithLocalPath(t *testing.T) {
 	os.Stderr = oldStderr
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "Detected:") {
@@ -94,8 +94,8 @@ func TestInstallWithLocalPath(t *testing.T) {
 func TestInstallDryRunShowsCopyMode(t *testing.T) {
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
@@ -110,7 +110,7 @@ func TestInstallDryRunShowsCopyMode(t *testing.T) {
 	os.Stderr = oldStderr
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "Dry run complete") {
@@ -121,8 +121,8 @@ func TestInstallDryRunShowsCopyMode(t *testing.T) {
 func TestInstallDryRunShowsLayers(t *testing.T) {
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
@@ -137,7 +137,7 @@ func TestInstallDryRunShowsLayers(t *testing.T) {
 	os.Stderr = oldStderr
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	// Should show base layer
@@ -172,14 +172,14 @@ func TestIsSymlinkHelper(t *testing.T) {
 
 	// Regular file
 	regFile := filepath.Join(dir, "regular.txt")
-	os.WriteFile(regFile, []byte("data"), 0644)
+	_ = os.WriteFile(regFile, []byte("data"), 0644)
 	if isSymlink(regFile) {
 		t.Fatal("regular file should not be a symlink")
 	}
 
 	// Symlink
 	linkFile := filepath.Join(dir, "link.txt")
-	os.Symlink(regFile, linkFile)
+	_ = os.Symlink(regFile, linkFile)
 	if !isSymlink(linkFile) {
 		t.Fatal("symlink should be detected as symlink")
 	}

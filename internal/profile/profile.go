@@ -9,9 +9,9 @@ import (
 // Profile represents a fully detected Linux environment.
 type Profile struct {
 	Distro     string `json:"distro"`
-	Session    string `json:"session"`     // "wayland" or "x11"
-	WM         string `json:"wm"`          // window manager or compositor
-	DE         string `json:"de"`          // desktop environment (if any)
+	Session    string `json:"session"` // "wayland" or "x11"
+	WM         string `json:"wm"`      // window manager or compositor
+	DE         string `json:"de"`      // desktop environment (if any)
 	Shell      string `json:"shell"`
 	Terminal   string `json:"terminal"`
 	GPU        string `json:"gpu"`

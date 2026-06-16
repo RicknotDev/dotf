@@ -157,7 +157,6 @@ Options:
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Printf("ERROR: cannot determine home directory: %v\n", err)
-		issues++
 		return nil
 	}
 
@@ -244,5 +243,3 @@ Options:
 
 	return nil
 }
-
-

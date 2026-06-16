@@ -96,8 +96,8 @@ func FindPackageFiles(layersDir string, layerPaths []string) []string {
 // Pacman implements Manager for Arch Linux pacman.
 type Pacman struct{}
 
-func (p *Pacman) Name() string           { return "pacman" }
-func (p *Pacman) Available() bool        { return which("pacman") }
+func (p *Pacman) Name() string    { return "pacman" }
+func (p *Pacman) Available() bool { return which("pacman") }
 func (p *Pacman) Install(pkgs []string) error {
 	return runCmd("pacman", append([]string{"-S", "--noconfirm", "--needed"}, pkgs...)...)
 }
@@ -110,8 +110,8 @@ func (p *Pacman) InstallOne(pkg string) error {
 // Paru implements Manager for paru (AUR helper).
 type Paru struct{}
 
-func (p *Paru) Name() string           { return "paru" }
-func (p *Paru) Available() bool        { return which("paru") }
+func (p *Paru) Name() string    { return "paru" }
+func (p *Paru) Available() bool { return which("paru") }
 func (p *Paru) Install(pkgs []string) error {
 	return runCmd("paru", append([]string{"-S", "--noconfirm", "--needed"}, pkgs...)...)
 }
@@ -124,8 +124,8 @@ func (p *Paru) InstallOne(pkg string) error {
 // Yay implements Manager for yay (AUR helper).
 type Yay struct{}
 
-func (y *Yay) Name() string           { return "yay" }
-func (y *Yay) Available() bool        { return which("yay") }
+func (y *Yay) Name() string    { return "yay" }
+func (y *Yay) Available() bool { return which("yay") }
 func (y *Yay) Install(pkgs []string) error {
 	return runCmd("yay", append([]string{"-S", "--noconfirm", "--needed"}, pkgs...)...)
 }
@@ -138,8 +138,8 @@ func (y *Yay) InstallOne(pkg string) error {
 // Apt implements Manager for Debian/Ubuntu apt.
 type Apt struct{}
 
-func (a *Apt) Name() string           { return "apt" }
-func (a *Apt) Available() bool        { return which("apt-get") }
+func (a *Apt) Name() string    { return "apt" }
+func (a *Apt) Available() bool { return which("apt-get") }
 func (a *Apt) Install(pkgs []string) error {
 	return runCmd("apt-get", append([]string{"install", "-y"}, pkgs...)...)
 }
@@ -152,8 +152,8 @@ func (a *Apt) InstallOne(pkg string) error {
 // Dnf implements Manager for Fedora dnf.
 type Dnf struct{}
 
-func (d *Dnf) Name() string           { return "dnf" }
-func (d *Dnf) Available() bool        { return which("dnf") }
+func (d *Dnf) Name() string    { return "dnf" }
+func (d *Dnf) Available() bool { return which("dnf") }
 func (d *Dnf) Install(pkgs []string) error {
 	return runCmd("dnf", append([]string{"install", "-y"}, pkgs...)...)
 }
@@ -166,8 +166,8 @@ func (d *Dnf) InstallOne(pkg string) error {
 // Zypper implements Manager for openSUSE zypper.
 type Zypper struct{}
 
-func (z *Zypper) Name() string           { return "zypper" }
-func (z *Zypper) Available() bool        { return which("zypper") }
+func (z *Zypper) Name() string    { return "zypper" }
+func (z *Zypper) Available() bool { return which("zypper") }
 func (z *Zypper) Install(pkgs []string) error {
 	return runCmd("zypper", append([]string{"install", "-y"}, pkgs...)...)
 }
@@ -180,8 +180,8 @@ func (z *Zypper) InstallOne(pkg string) error {
 // Nix implements Manager for NixOS nix-env / nix profile.
 type Nix struct{}
 
-func (n *Nix) Name() string           { return "nix" }
-func (n *Nix) Available() bool        { return which("nix-env") || which("nix") }
+func (n *Nix) Name() string    { return "nix" }
+func (n *Nix) Available() bool { return which("nix-env") || which("nix") }
 func (n *Nix) Install(pkgs []string) error {
 	// Try nix profile install first, fall back to nix-env
 	if which("nix") {

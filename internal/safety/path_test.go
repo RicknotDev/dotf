@@ -109,7 +109,7 @@ func TestValidateTargetPathSensitive(t *testing.T) {
 
 func TestIsSensitivePath(t *testing.T) {
 	tests := []struct {
-		path     string
+		path      string
 		sensitive bool
 	}{
 		{"/etc/passwd", true},

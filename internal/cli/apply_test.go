@@ -29,14 +29,19 @@ func TestApplyNoLayers(t *testing.T) {
 
 func TestApplyDryRun(t *testing.T) {
 	dir := setupTestRepo(t)
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	stateDir := t.TempDir()
 	cfg := OutputConfig{}
 
-	err := Apply([]string{"--dry-run"}, stateDir, cfg)
+	err = Apply([]string{"--dry-run"}, stateDir, cfg)
 	if err != nil {
 		t.Fatalf("Apply --dry-run failed: %v", err)
 	}
@@ -44,9 +49,14 @@ func TestApplyDryRun(t *testing.T) {
 
 func TestApplyNoInteractiveConflict(t *testing.T) {
 	dir := setupTestRepo(t)
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	stateDir := t.TempDir()
 	cfg := OutputConfig{}
@@ -56,16 +66,14 @@ func TestApplyNoInteractiveConflict(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 
 	// With --no-interactive and no conflicts, apply should work
-	// But the apply function tries to create symlinks in HOME which is a temp dir
-	// This is fine - we just want to check it doesn't crash
 	_ = Apply([]string{"--no-interactive"}, stateDir, cfg)
 }
 
 func TestApplyDiff(t *testing.T) {
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	stateDir := t.TempDir()
 	cfg := OutputConfig{}
@@ -79,8 +87,8 @@ func TestApplyDiff(t *testing.T) {
 func TestApplyProfileFlag(t *testing.T) {
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	stateDir := t.TempDir()
 	cfg := OutputConfig{}
@@ -99,11 +107,11 @@ func TestApplyWithDotfYaml(t *testing.T) {
 layers:
   - base
 `
-	os.WriteFile(filepath.Join(dir, "dotf.yaml"), []byte(yamlContent), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "dotf.yaml"), []byte(yamlContent), 0644)
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	stateDir := t.TempDir()
 	cfg := OutputConfig{}
@@ -117,8 +125,8 @@ layers:
 func TestApplyDryRunNoChanges(t *testing.T) {
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	stateDir := t.TempDir()
 	t.Setenv("HOME", t.TempDir())

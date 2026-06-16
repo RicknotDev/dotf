@@ -133,7 +133,9 @@ func TestDiscoverSecretsEmptyLayerPath(t *testing.T) {
 
 	// No secrets directory at all
 	layersDir := filepath.Join(dir, "layers")
-	os.MkdirAll(layersDir, 0755)
+	if err := os.MkdirAll(layersDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	secrets := DiscoverSecrets(layersDir, []string{"base"})
 	if len(secrets) != 0 {

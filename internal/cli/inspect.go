@@ -224,7 +224,7 @@ func inspectOverrides(repoRoot string) error {
 	fmt.Println("All resolved files:")
 	allFiles := make(map[string][]string)
 	for _, l := range result.Layers {
-		// Best-effort collection of files
+		//nolint:errcheck // best-effort file listing for display
 		filepath.WalkDir(l.DirPath, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return nil
@@ -296,5 +296,3 @@ func inspectBackup(stateDir string) error {
 
 	return nil
 }
-
-

@@ -30,7 +30,7 @@ func TestCreateBackup(t *testing.T) {
 
 	// Create a file to back up
 	origDir := filepath.Join(dir, "home")
-	os.MkdirAll(origDir, 0755)
+	_ = os.MkdirAll(origDir, 0755)
 	origFile := filepath.Join(origDir, ".zshrc")
 	if err := os.WriteFile(origFile, []byte("export FOO=bar"), 0644); err != nil {
 		t.Fatal(err)
@@ -81,9 +81,9 @@ func TestCreateBackupSymlink(t *testing.T) {
 
 	// Create a symlink (should not be backed up)
 	target := filepath.Join(dir, "target")
-	os.WriteFile(target, []byte("data"), 0644)
+	_ = os.WriteFile(target, []byte("data"), 0644)
 	link := filepath.Join(dir, "link")
-	os.Symlink(target, link)
+	_ = os.Symlink(target, link)
 
 	b, err := m.Create("link", link)
 	if err != nil {
@@ -103,13 +103,13 @@ func TestListBackups(t *testing.T) {
 
 	// Create multiple backups of the same file
 	origDir := filepath.Join(dir, "home")
-	os.MkdirAll(origDir, 0755)
+	_ = os.MkdirAll(origDir, 0755)
 	origFile := filepath.Join(origDir, ".zshrc")
 
 	for i := 0; i < 3; i++ {
 		content := []byte("export VERSION=" + string(rune('0'+i)))
-		os.WriteFile(origFile, content, 0644)
-		m.Create(".zshrc", origFile)
+		_ = os.WriteFile(origFile, content, 0644)
+		_, _ = m.Create(".zshrc", origFile)
 	}
 
 	backups, err := m.List(".zshrc")
@@ -136,7 +136,7 @@ func TestListAllBackups(t *testing.T) {
 
 	// Create backups for different files
 	home := filepath.Join(dir, "home")
-	os.MkdirAll(home, 0755)
+	_ = os.MkdirAll(home, 0755)
 
 	for _, pair := range [][2]string{
 		{".zshrc", "export A=1"},
@@ -144,9 +144,9 @@ func TestListAllBackups(t *testing.T) {
 		{".config/nvim/init.lua", "vim.opt.number=true"},
 	} {
 		f := filepath.Join(home, pair[0])
-		os.MkdirAll(filepath.Dir(f), 0755)
-		os.WriteFile(f, []byte(pair[1]), 0644)
-		m.Create(pair[0], f)
+		_ = os.MkdirAll(filepath.Dir(f), 0755)
+		_ = os.WriteFile(f, []byte(pair[1]), 0644)
+		_, _ = m.Create(pair[0], f)
 	}
 
 	all, err := m.ListAll()
@@ -166,9 +166,9 @@ func TestVerifyBackup(t *testing.T) {
 	}
 
 	home := filepath.Join(dir, "home")
-	os.MkdirAll(home, 0755)
+	_ = os.MkdirAll(home, 0755)
 	origFile := filepath.Join(home, "test.txt")
-	os.WriteFile(origFile, []byte("content"), 0644)
+	_ = os.WriteFile(origFile, []byte("content"), 0644)
 
 	b, err := m.Create("test.txt", origFile)
 	if err != nil {
@@ -184,7 +184,7 @@ func TestVerifyBackup(t *testing.T) {
 	}
 
 	// Corrupt the backup
-	os.WriteFile(b.BackupPath, []byte("corrupted"), 0644)
+	_ = os.WriteFile(b.BackupPath, []byte("corrupted"), 0644)
 	valid, err = m.Verify(*b)
 	if err != nil {
 		t.Fatalf("Verify() after corruption failed: %v", err)
@@ -202,10 +202,10 @@ func TestRestoreBackup(t *testing.T) {
 	}
 
 	home := filepath.Join(dir, "home")
-	os.MkdirAll(home, 0755)
+	_ = os.MkdirAll(home, 0755)
 	origContent := []byte("original content")
 	origFile := filepath.Join(home, "restore-test.txt")
-	os.WriteFile(origFile, origContent, 0644)
+	_ = os.WriteFile(origFile, origContent, 0644)
 
 	b, err := m.Create("restore-test.txt", origFile)
 	if err != nil {
@@ -213,11 +213,11 @@ func TestRestoreBackup(t *testing.T) {
 	}
 
 	// Change the original
-	os.WriteFile(origFile, []byte("modified content"), 0644)
+	_ = os.WriteFile(origFile, []byte("modified content"), 0644)
 
 	// Restore
 	targetDir := filepath.Join(dir, "restore-target")
-	os.MkdirAll(targetDir, 0755)
+	_ = os.MkdirAll(targetDir, 0755)
 	targetFile := filepath.Join(targetDir, "restore-test.txt")
 
 	if err := m.Restore(*b, targetFile); err != nil {
@@ -243,13 +243,13 @@ func TestBackupPruning(t *testing.T) {
 	m.maxKeep = 2
 
 	home := filepath.Join(dir, "home")
-	os.MkdirAll(home, 0755)
+	_ = os.MkdirAll(home, 0755)
 	origFile := filepath.Join(home, "prune-test.txt")
 
 	// Create 4 backups (only 2 should remain after pruning)
 	for i := 0; i < 4; i++ {
-		os.WriteFile(origFile, []byte("content"), 0644)
-		m.Create("prune-test.txt", origFile)
+		_ = os.WriteFile(origFile, []byte("content"), 0644)
+		_, _ = m.Create("prune-test.txt", origFile)
 	}
 
 	backups, _ := m.List("prune-test.txt")

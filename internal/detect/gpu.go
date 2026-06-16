@@ -12,7 +12,7 @@ var gpuVendors = map[string]string{
 	"0x1022": "amd", // AMD
 	"0x8086": "intel",
 	"0x10de": "nvidia",
-	"0x1ae0": "nvidia", // NVIDIA
+	"0x1ae0": "nvidia",    // NVIDIA
 	"0x1414": "microsoft", // Hyper-V
 	"0x15ad": "vmware",
 	"0x1234": "qemu",

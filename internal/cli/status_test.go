@@ -39,7 +39,7 @@ func TestStatusNoFiles(t *testing.T) {
 	w.Close()
 	os.Stdout = oldStdout
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	_ = buf.String()
 }
 
@@ -54,24 +54,24 @@ func TestStatusWithInstalledFiles(t *testing.T) {
 
 	// Create a repo structure to point to
 	repoDir := t.TempDir()
-	os.MkdirAll(filepath.Join(repoDir, "layers", "base"), 0755)
-	os.WriteFile(filepath.Join(repoDir, "layers", "base", ".zshrc"), []byte("export FOO=bar"), 0644)
+	_ = os.MkdirAll(filepath.Join(repoDir, "layers", "base"), 0755)
+	_ = os.WriteFile(filepath.Join(repoDir, "layers", "base", ".zshrc"), []byte("export FOO=bar"), 0644)
 
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 
 	// Create actual symlink
 	symlinkPath := filepath.Join(homeDir, ".zshrc")
-	os.Symlink(filepath.Join(repoDir, "layers", "base", ".zshrc"), symlinkPath)
+	_ = os.Symlink(filepath.Join(repoDir, "layers", "base", ".zshrc"), symlinkPath)
 
 	sourcePath := filepath.Join(repoDir, "layers", "base", ".zshrc")
 	sm.RecordFile(".zshrc", "base", "symlink", sourcePath)
 	sm.RecordInstall([]string{"base"})
-	sm.Save()
+	_ = sm.Save()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(repoDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(repoDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	cfg := OutputConfig{}
 	oldStdout := os.Stdout
@@ -86,7 +86,7 @@ func TestStatusWithInstalledFiles(t *testing.T) {
 	w.Close()
 	os.Stdout = oldStdout
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "Status:") {
@@ -105,21 +105,21 @@ func TestStatusJSON(t *testing.T) {
 	}
 
 	repoDir := t.TempDir()
-	os.MkdirAll(filepath.Join(repoDir, "layers", "base"), 0755)
-	os.WriteFile(filepath.Join(repoDir, "layers", "base", ".zshrc"), []byte("data"), 0644)
+	_ = os.MkdirAll(filepath.Join(repoDir, "layers", "base"), 0755)
+	_ = os.WriteFile(filepath.Join(repoDir, "layers", "base", ".zshrc"), []byte("data"), 0644)
 
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 
 	symlinkPath := filepath.Join(homeDir, ".zshrc")
-	os.Symlink(filepath.Join(repoDir, "layers", "base", ".zshrc"), symlinkPath)
+	_ = os.Symlink(filepath.Join(repoDir, "layers", "base", ".zshrc"), symlinkPath)
 
 	sm.RecordFile(".zshrc", "base", "symlink", filepath.Join(repoDir, "layers", "base", ".zshrc"))
-	sm.Save()
+	_ = sm.Save()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(repoDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(repoDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	cfg := OutputConfig{JSON: true}
 	oldStdout := os.Stdout
@@ -134,7 +134,7 @@ func TestStatusJSON(t *testing.T) {
 	w.Close()
 	os.Stdout = oldStdout
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "\"version\"") {
@@ -156,21 +156,21 @@ func TestStatusShort(t *testing.T) {
 	}
 
 	repoDir := t.TempDir()
-	os.MkdirAll(filepath.Join(repoDir, "layers", "base"), 0755)
-	os.WriteFile(filepath.Join(repoDir, "layers", "base", ".zshrc"), []byte("data"), 0644)
+	_ = os.MkdirAll(filepath.Join(repoDir, "layers", "base"), 0755)
+	_ = os.WriteFile(filepath.Join(repoDir, "layers", "base", ".zshrc"), []byte("data"), 0644)
 
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 
 	symlinkPath := filepath.Join(homeDir, ".zshrc")
-	os.Symlink(filepath.Join(repoDir, "layers", "base", ".zshrc"), symlinkPath)
+	_ = os.Symlink(filepath.Join(repoDir, "layers", "base", ".zshrc"), symlinkPath)
 
 	sm.RecordFile(".zshrc", "base", "symlink", filepath.Join(repoDir, "layers", "base", ".zshrc"))
-	sm.Save()
+	_ = sm.Save()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(repoDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(repoDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	cfg := OutputConfig{}
 	oldStdout := os.Stdout
@@ -185,11 +185,10 @@ func TestStatusShort(t *testing.T) {
 	w.Close()
 	os.Stdout = oldStdout
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	// With only OK files, --short should show nothing (just the summary)
-	// Even the summary line should not show if everything is OK in short mode
 	_ = output
 }
 
@@ -206,14 +205,14 @@ func TestStatusBrokenSymlink(t *testing.T) {
 
 	// Create symlink to non-existent file
 	symlinkPath := filepath.Join(homeDir, "broken.txt")
-	os.Symlink(filepath.Join(repoDir, "nonexistent.txt"), symlinkPath)
+	_ = os.Symlink(filepath.Join(repoDir, "nonexistent.txt"), symlinkPath)
 
 	sm.RecordFile("broken.txt", "base", "symlink", filepath.Join(repoDir, "nonexistent.txt"))
-	sm.Save()
+	_ = sm.Save()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(repoDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(repoDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	cfg := OutputConfig{}
 	oldStdout := os.Stdout
@@ -232,7 +231,7 @@ func TestStatusBrokenSymlink(t *testing.T) {
 	w.Close()
 	os.Stdout = oldStdout
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "broken") {
@@ -253,20 +252,20 @@ func TestStatusWithFilter(t *testing.T) {
 
 	// Create an OK symlink
 	symlinkPath := filepath.Join(homeDir, ".zshrc")
-	os.WriteFile(filepath.Join(repoDir, "ok_target.txt"), []byte("data"), 0644)
-	os.Symlink(filepath.Join(repoDir, "ok_target.txt"), symlinkPath)
+	_ = os.WriteFile(filepath.Join(repoDir, "ok_target.txt"), []byte("data"), 0644)
+	_ = os.Symlink(filepath.Join(repoDir, "ok_target.txt"), symlinkPath)
 	sm.RecordFile(".zshrc", "base", "symlink", filepath.Join(repoDir, "ok_target.txt"))
 
 	// Create a broken symlink
 	brokenPath := filepath.Join(homeDir, "broken.txt")
-	os.Symlink(filepath.Join(repoDir, "nonexistent.txt"), brokenPath)
+	_ = os.Symlink(filepath.Join(repoDir, "nonexistent.txt"), brokenPath)
 	sm.RecordFile("broken.txt", "base", "symlink", filepath.Join(repoDir, "nonexistent.txt"))
 
-	sm.Save()
+	_ = sm.Save()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(repoDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(repoDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Test JSON with filter
 	cfg := OutputConfig{JSON: true, Filter: "broken"}
@@ -281,7 +280,7 @@ func TestStatusWithFilter(t *testing.T) {
 	w.Close()
 	os.Stdout = oldStdout
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	// The output may vary but should be valid JSON
@@ -303,11 +302,11 @@ func TestStatusWithMissingFile(t *testing.T) {
 
 	// Record a file that doesn't exist on filesystem
 	sm.RecordFile("missing.txt", "base", "symlink", filepath.Join(repoDir, "source.txt"))
-	sm.Save()
+	_ = sm.Save()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(repoDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(repoDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	cfg := OutputConfig{}
 	err = Status([]string{}, stateDir, cfg)
@@ -331,14 +330,14 @@ func TestStatusNoColor(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 
 	symlinkPath := filepath.Join(homeDir, ".zshrc")
-	os.WriteFile(filepath.Join(repoDir, "target.txt"), []byte("data"), 0644)
-	os.Symlink(filepath.Join(repoDir, "target.txt"), symlinkPath)
+	_ = os.WriteFile(filepath.Join(repoDir, "target.txt"), []byte("data"), 0644)
+	_ = os.Symlink(filepath.Join(repoDir, "target.txt"), symlinkPath)
 	sm.RecordFile(".zshrc", "base", "symlink", filepath.Join(repoDir, "target.txt"))
-	sm.Save()
+	_ = sm.Save()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(repoDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(repoDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Using --no-color should produce clean output
 	cfg := OutputConfig{NoColor: true}
@@ -354,7 +353,7 @@ func TestStatusNoColor(t *testing.T) {
 	w.Close()
 	os.Stdout = oldStdout
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	// Should not contain color codes

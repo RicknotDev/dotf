@@ -9,9 +9,13 @@ import (
 func TestValidateTargetPathSymlinkToOtherLocation(t *testing.T) {
 	home := t.TempDir()
 	outsideTarget := filepath.Join(home, "..", "outside.txt")
-	os.WriteFile(outsideTarget, []byte("data"), 0644)
+	if err := os.WriteFile(outsideTarget, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	linkPath := filepath.Join(home, ".zshrc")
-	os.Symlink(outsideTarget, linkPath)
+	if err := os.Symlink(outsideTarget, linkPath); err != nil {
+		t.Fatal(err)
+	}
 
 	result := ValidateTargetPath(home, ".zshrc")
 	if !result.Safe {
@@ -49,9 +53,13 @@ func TestValidateLayerFileNonExistent(t *testing.T) {
 func TestValidateLayerFileSymlinkWithinRepo(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target.txt")
-	os.WriteFile(target, []byte("data"), 0644)
+	if err := os.WriteFile(target, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	link := filepath.Join(dir, "link.txt")
-	os.Symlink(target, link)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
 
 	result := ValidateLayerFile(dir, link)
 	if !result.Safe {

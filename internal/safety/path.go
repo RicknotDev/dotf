@@ -35,9 +35,9 @@ const MaxFilePath = 4096
 
 // PathValidationResult contains the result of a path validation.
 type PathValidationResult struct {
-	Safe          bool
-	Reason        string
-	Normalized    string // Cleaned absolute path
+	Safe       bool
+	Reason     string
+	Normalized string // Cleaned absolute path
 }
 
 // ValidateLayerFile validates a file path within a repository layer.

@@ -14,22 +14,22 @@ import (
 // AppLayerMap maps flat application directory names to their corresponding
 // layer type/name paths within the layers/ directory structure.
 var AppLayerMap = map[string]string{
-	"alacritty": "terminal/alacritty",
-	"awesome":   "wm/awesome",
-	"cht-sh":    "base",
-	"fish":      "shell/fish",
-	"flameshot": "base",
-	"ghostty":   "terminal/ghostty",
-	"neofetch":  "base",
-	"nix":       "base",
-	"picom":     "wm/picom",
+	"alacritty":  "terminal/alacritty",
+	"awesome":    "wm/awesome",
+	"cht-sh":     "base",
+	"fish":       "shell/fish",
+	"flameshot":  "base",
+	"ghostty":    "terminal/ghostty",
+	"neofetch":   "base",
+	"nix":        "base",
+	"picom":      "wm/picom",
 	"presenterm": "base",
-	"rofi":      "wm/rofi",
-	"scripts":   "base",
-	"starship":  "shell/starship",
-	"tmux":      "base",
-	"yazi":      "base",
-	"zsh":       "shell/zsh",
+	"rofi":       "wm/rofi",
+	"scripts":    "base",
+	"starship":   "shell/starship",
+	"tmux":       "base",
+	"yazi":       "base",
+	"zsh":        "shell/zsh",
 }
 
 // DetectionLayerDirs lists empty layer directories that should be created
@@ -58,10 +58,10 @@ var DetectionLayerDirs = []string{
 
 // Result describes what the reorganization did.
 type Result struct {
-	Moved    map[string]int  // layer path -> file count
-	Created  []string        // created directories
-	Skipped  []string        // skipped app dirs with reasons
-	Orphans  []string        // flat dirs that couldn't be mapped
+	Moved   map[string]int // layer path -> file count
+	Created []string       // created directories
+	Skipped []string       // skipped app dirs with reasons
+	Orphans []string       // flat dirs that couldn't be mapped
 }
 
 // Analyze scans the dotfiles directory and determines which flat directories
@@ -308,13 +308,14 @@ func IsFlatStructure(dotfilesDir string) bool {
 }
 
 // collectFiles recursively collects all file paths relative to root, skipping .git.
+// Best-effort: errors during walk are ignored, partial results are returned.
 func collectFiles(root string) []string {
 	var files []string
+	//nolint:errcheck // best-effort collection
 	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		// Skip entire .git directory
 		if d.IsDir() && d.Name() == ".git" {
 			return filepath.SkipDir
 		}
@@ -332,13 +333,14 @@ func collectFiles(root string) []string {
 }
 
 // countFiles counts non-hidden files in a directory tree, skipping .git.
+// Best-effort: errors during walk are ignored, partial results are returned.
 func countFiles(root string) int {
 	count := 0
+	//nolint:errcheck // best-effort counting
 	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		// Skip entire .git directory
 		if d.IsDir() && d.Name() == ".git" {
 			return filepath.SkipDir
 		}

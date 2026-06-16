@@ -14,12 +14,12 @@ import (
 
 // State represents the full DOTF state.
 type State struct {
-	Version        int                `json:"version"`
-	Repository     string             `json:"repository"`
-	LastInstall    string             `json:"last_install,omitempty"`
-	InstalledLayers []string          `json:"installed_layers,omitempty"`
-	InstalledFiles map[string]FileRef `json:"installed_files,omitempty"`
-	BackupManifest map[string]Backup  `json:"backup_manifest,omitempty"`
+	Version         int                `json:"version"`
+	Repository      string             `json:"repository"`
+	LastInstall     string             `json:"last_install,omitempty"`
+	InstalledLayers []string           `json:"installed_layers,omitempty"`
+	InstalledFiles  map[string]FileRef `json:"installed_files,omitempty"`
+	BackupManifest  map[string]Backup  `json:"backup_manifest,omitempty"`
 }
 
 // FileRef describes an installed file.

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/codebuff/dotf/internal/detect"
 )
 
 // setupTestRepo creates a minimal DOTF repository structure for testing.
@@ -59,7 +61,7 @@ func TestExplainInRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(oldWd)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
@@ -79,7 +81,7 @@ func TestExplainInRepo(t *testing.T) {
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	// Should contain key sections
@@ -99,11 +101,26 @@ func TestExplainInRepo(t *testing.T) {
 
 func TestExplainShowsOverrides(t *testing.T) {
 	dir := setupTestRepo(t)
+
+	// Create a distro layer matching the current environment so this test
+	// works on any Linux distro (CI runs on Ubuntu, local might be arch, etc.)
+	p := detect.Detect()
+	if p.Distro != "" {
+		distroLayerDir := filepath.Join(dir, "layers", "distro", p.Distro)
+		if err := os.MkdirAll(distroLayerDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(distroLayerDir, ".zshrc"),
+			[]byte("export DISTRO_SPECIFIC=1\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	oldWd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(oldWd)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
@@ -122,10 +139,10 @@ func TestExplainShowsOverrides(t *testing.T) {
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
-	// The arch/distro layer overrides base for .zshrc
+	// The distro layer overrides base for .zshrc
 	if !strings.Contains(output, "overrides") {
 		t.Fatal("expected override info in explain output when layers have overlapping files")
 	}
@@ -135,8 +152,8 @@ func TestExplainWithoutLayers(t *testing.T) {
 	dir := t.TempDir()
 	// No layers directory
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
@@ -151,7 +168,7 @@ func TestExplainWithoutLayers(t *testing.T) {
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "Activated Layers:") {
@@ -171,8 +188,8 @@ func TestExplainNoArgsIsOK(t *testing.T) {
 	// No args should not error (runs explain in current dir)
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	err := Explain([]string{})
 	if err != nil {

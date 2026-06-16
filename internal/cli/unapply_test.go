@@ -41,11 +41,11 @@ func TestUnapplyDryRun(t *testing.T) {
 
 	// Create a dummy installed file
 	symlinkPath := filepath.Join(homeDir, ".zshrc")
-	os.WriteFile(filepath.Join(homeDir, "target.txt"), []byte("data"), 0644)
-	os.Symlink(filepath.Join(homeDir, "target.txt"), symlinkPath)
+	_ = os.WriteFile(filepath.Join(homeDir, "target.txt"), []byte("data"), 0644)
+	_ = os.Symlink(filepath.Join(homeDir, "target.txt"), symlinkPath)
 	sm.RecordFile(".zshrc", "base", "symlink", filepath.Join(homeDir, "target.txt"))
 	sm.RecordInstall([]string{"base"})
-	sm.Save()
+	_ = sm.Save()
 
 	cfg := OutputConfig{}
 	err = Unapply([]string{"--dry-run"}, stateDir, cfg)
@@ -72,11 +72,11 @@ func TestUnapplyWithInstalledFiles(t *testing.T) {
 	// Create a symlink as if it was installed
 	symlinkPath := filepath.Join(homeDir, ".zshrc")
 	sourcePath := filepath.Join(homeDir, "source.txt")
-	os.WriteFile(sourcePath, []byte("data"), 0644)
-	os.Symlink(sourcePath, symlinkPath)
+	_ = os.WriteFile(sourcePath, []byte("data"), 0644)
+	_ = os.Symlink(sourcePath, symlinkPath)
 	sm.RecordFile(".zshrc", "base", "symlink", sourcePath)
 	sm.RecordInstall([]string{"base"})
-	sm.Save()
+	_ = sm.Save()
 
 	cfg := OutputConfig{}
 	err = Unapply([]string{}, stateDir, cfg)
@@ -102,10 +102,10 @@ func TestUnapplyJSON(t *testing.T) {
 
 	symlinkPath := filepath.Join(homeDir, ".zshrc")
 	sourcePath := filepath.Join(homeDir, "source.txt")
-	os.WriteFile(sourcePath, []byte("data"), 0644)
-	os.Symlink(sourcePath, symlinkPath)
+	_ = os.WriteFile(sourcePath, []byte("data"), 0644)
+	_ = os.Symlink(sourcePath, symlinkPath)
 	sm.RecordFile(".zshrc", "base", "symlink", sourcePath)
-	sm.Save()
+	_ = sm.Save()
 
 	cfg := OutputConfig{JSON: true}
 	err = Unapply([]string{}, stateDir, cfg)
@@ -127,10 +127,10 @@ func TestUnapplyIdempotent(t *testing.T) {
 
 	symlinkPath := filepath.Join(homeDir, ".zshrc")
 	sourcePath := filepath.Join(homeDir, "source.txt")
-	os.WriteFile(sourcePath, []byte("data"), 0644)
-	os.Symlink(sourcePath, symlinkPath)
+	_ = os.WriteFile(sourcePath, []byte("data"), 0644)
+	_ = os.Symlink(sourcePath, symlinkPath)
 	sm.RecordFile(".zshrc", "base", "symlink", sourcePath)
-	sm.Save()
+	_ = sm.Save()
 
 	cfg := OutputConfig{}
 	err = Unapply([]string{}, stateDir, cfg)
@@ -157,7 +157,7 @@ func TestUnapplyNonExistentFile(t *testing.T) {
 
 	// Record a file but don't create it on disk
 	sm.RecordFile("missing.txt", "base", "symlink", filepath.Join(homeDir, "source.txt"))
-	sm.Save()
+	_ = sm.Save()
 
 	cfg := OutputConfig{}
 	err = Unapply([]string{}, stateDir, cfg)

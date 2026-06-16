@@ -18,8 +18,8 @@ func TestDoctorHelp(t *testing.T) {
 func TestDoctorRunsChecks(t *testing.T) {
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
@@ -34,12 +34,13 @@ func TestDoctorRunsChecks(t *testing.T) {
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "DOTF Doctor") {
 		t.Fatal("expected 'DOTF Doctor' header")
 	}
+
 	if !strings.Contains(output, "Checking lock status") {
 		t.Fatal("expected lock status check")
 	}
@@ -62,8 +63,8 @@ func TestDoctorFixUnlock(t *testing.T) {
 
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
@@ -79,7 +80,7 @@ func TestDoctorFixUnlock(t *testing.T) {
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "Lock released") && !strings.Contains(output, "Stale lock released") {
@@ -101,8 +102,8 @@ func TestDoctorVerifyBackups(t *testing.T) {
 
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
@@ -117,7 +118,7 @@ func TestDoctorVerifyBackups(t *testing.T) {
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "backups verified") || !strings.Contains(output, "Verifying backup integrity") {
@@ -138,8 +139,8 @@ func TestDoctorListHooks(t *testing.T) {
 	}
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
@@ -154,7 +155,7 @@ func TestDoctorListHooks(t *testing.T) {
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "Available hooks") {
@@ -168,8 +169,8 @@ func TestDoctorListHooks(t *testing.T) {
 func TestDoctorEmptyStateDir(t *testing.T) {
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
@@ -185,7 +186,7 @@ func TestDoctorEmptyStateDir(t *testing.T) {
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "All checks passed") {

@@ -433,7 +433,7 @@ walkLayers:
 			if installError != nil {
 				stats.Errors = append(stats.Errors, fmt.Sprintf("install %s: %v", rel, installError))
 				installErr = fmt.Errorf("install %s: %w", rel, installError) // signal rollback
-				return filepath.SkipAll // abort the walk
+				return filepath.SkipAll                                      // abort the walk
 			}
 
 			stats.Created++

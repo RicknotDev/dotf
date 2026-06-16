@@ -29,8 +29,8 @@ func (l ResolvedLayer) Path() string {
 // ResolveResult contains the full resolution output.
 type ResolveResult struct {
 	Profile profile.Profile
-	Layers  []ResolvedLayer    // existing layers, from lowest to highest priority
-	Missing []profile.Layer   // layers that were detected but don't exist in the repo
+	Layers  []ResolvedLayer // existing layers, from lowest to highest priority
+	Missing []profile.Layer // layers that were detected but don't exist in the repo
 }
 
 // Resolve resolves layers from a profile against the repository's layers directory.

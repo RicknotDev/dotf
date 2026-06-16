@@ -35,8 +35,8 @@ func TestInspectInvalidSubcommand(t *testing.T) {
 func TestInspectLayer(t *testing.T) {
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
@@ -51,7 +51,7 @@ func TestInspectLayer(t *testing.T) {
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "Layer: base") {
@@ -68,8 +68,8 @@ func TestInspectLayer(t *testing.T) {
 func TestInspectLayerNotFound(t *testing.T) {
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	err := Inspect([]string{"layer", "nonexistent"}, t.TempDir())
 	if err == nil {
@@ -93,7 +93,7 @@ func TestInspectState(t *testing.T) {
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "DOTF State") {
@@ -107,8 +107,8 @@ func TestInspectState(t *testing.T) {
 func TestInspectOverrides(t *testing.T) {
 	dir := setupTestRepo(t)
 	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(dir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
@@ -123,7 +123,7 @@ func TestInspectOverrides(t *testing.T) {
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "File Overrides") {
@@ -163,7 +163,7 @@ func TestInspectBackup(t *testing.T) {
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "Backup Manifest") {

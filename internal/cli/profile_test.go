@@ -162,7 +162,7 @@ func TestInferDotfConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Add a file so the layer is non-empty (makes it a valid layer)
-		os.WriteFile(filepath.Join(dir, d, ".keep"), []byte(""), 0644)
+		_ = os.WriteFile(filepath.Join(dir, d, ".keep"), []byte(""), 0644)
 	}
 
 	cfg, err := InferDotfConfig(dir)
@@ -206,7 +206,7 @@ func TestInferDotfConfigNoLayersDir(t *testing.T) {
 
 func TestInferDotfConfigEmptyLayersDir(t *testing.T) {
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "layers"), 0755)
+	_ = os.MkdirAll(filepath.Join(dir, "layers"), 0755)
 
 	cfg, err := InferDotfConfig(dir)
 	if err != nil {
@@ -222,8 +222,8 @@ func TestInferDotfConfigEmptyLayersDir(t *testing.T) {
 
 func TestInferDotfConfigWithBaseOnly(t *testing.T) {
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "layers", "base"), 0755)
-	os.WriteFile(filepath.Join(dir, "layers", "base", ".keep"), []byte(""), 0644)
+	_ = os.MkdirAll(filepath.Join(dir, "layers", "base"), 0755)
+	_ = os.WriteFile(filepath.Join(dir, "layers", "base", ".keep"), []byte(""), 0644)
 
 	cfg, err := InferDotfConfig(dir)
 	if err != nil {
@@ -310,8 +310,8 @@ func TestInferAndLoadRoundTrip(t *testing.T) {
 		"layers/distro/arch",
 	}
 	for _, l := range layers {
-		os.MkdirAll(filepath.Join(dir, l), 0755)
-		os.WriteFile(filepath.Join(dir, l, ".keep"), []byte(""), 0644)
+		_ = os.MkdirAll(filepath.Join(dir, l), 0755)
+		_ = os.WriteFile(filepath.Join(dir, l, ".keep"), []byte(""), 0644)
 	}
 
 	// Infer config from the structure
@@ -328,7 +328,7 @@ func TestInferAndLoadRoundTrip(t *testing.T) {
 	for _, l := range inferred.Layers {
 		cfgContent += "  - " + l + "\n"
 	}
-	os.WriteFile(filepath.Join(dir, "dotf.yaml"), []byte(cfgContent), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "dotf.yaml"), []byte(cfgContent), 0644)
 
 	// Load it back
 	loaded, err := LoadDotfConfig(dir)

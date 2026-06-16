@@ -32,10 +32,10 @@ const (
 
 // Hook describes an executable hook.
 type Hook struct {
-	Type     HookType
-	Path     string // absolute path to the hook script
-	Layer    string // which layer provides this hook
-	Timeout  time.Duration
+	Type    HookType
+	Path    string // absolute path to the hook script
+	Layer   string // which layer provides this hook
+	Timeout time.Duration
 }
 
 // ExecutionResult contains the result of a hook execution.

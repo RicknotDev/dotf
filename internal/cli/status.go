@@ -139,14 +139,14 @@ Examples:
 			}
 		} else {
 			entry.Type = "file"
-			// Regular file (was copied or replaced)
-			if ref.Type == "copy" || ref.Type == "symlink" {
+			// Regular file — this is expected for copy mode, conflict for symlink mode
+			if ref.Type == "copy" {
+				entry.Status = StatusOK
+				okCount++
+			} else {
 				entry.Status = StatusConflict
 				entry.Detail = "expected symlink but found regular file"
 				issueCount++
-			} else {
-				entry.Status = StatusOK
-				okCount++
 			}
 		}
 

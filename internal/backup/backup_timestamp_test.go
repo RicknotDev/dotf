@@ -16,7 +16,7 @@ func TestBackupTimestampUnique(t *testing.T) {
 	}
 
 	home := filepath.Join(dir, "home")
-	os.MkdirAll(home, 0755)
+	_ = os.MkdirAll(home, 0755)
 	origFile := filepath.Join(home, "test.txt")
 
 	// Create 5 backups of the same file as fast as possible
@@ -76,14 +76,14 @@ func TestBackupSameSecondRace(t *testing.T) {
 	}
 
 	home := filepath.Join(dir, "home")
-	os.MkdirAll(home, 0755)
+	_ = os.MkdirAll(home, 0755)
 	origFile := filepath.Join(home, "race.txt")
-	os.WriteFile(origFile, []byte("original"), 0644)
+	_ = os.WriteFile(origFile, []byte("original"), 0644)
 
 	// Create 3 backups rapidly
 	for i := 0; i < 3; i++ {
 		content := []byte("version" + string(rune('0'+i)))
-		os.WriteFile(origFile, content, 0644)
+		_ = os.WriteFile(origFile, content, 0644)
 		b, err := m.Create("race.txt", origFile)
 		if err != nil {
 			t.Fatalf("Create() failed: %v", err)
