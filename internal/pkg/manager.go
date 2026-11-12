@@ -1,53 +1,119 @@
-// Package pkg provides a unified abstraction over Linux package managers.
-// Supports pacman, paru, yay, apt, dnf, zypper, and nix.
+// Package pkg installs package lists with the system package manager.
+//
+// Each layer may contain packages/<manager>.txt files, one package per line
+// (# starts a comment). Only the files meant for the detected manager are
+// used: pacman.txt for pacman, paru and yay (plus aur.txt for paru and yay),
+// apt.txt, dnf.txt, zypper.txt and nix.txt. Other files are ignored.
 package pkg
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
-// Manager defines the interface for a package manager.
-type Manager interface {
-	// Name returns the display name of the package manager.
-	Name() string
-
-	// Available checks if this package manager is installed.
-	Available() bool
-
-	// Install installs the given packages.
-	Install(pkgs []string) error
-
-	// InstallOne installs a single package.
-	InstallOne(pkg string) error
+// Manager describes a package manager.
+type Manager struct {
+	name     string
+	bin      string
+	args     []string // arguments before the package names
+	needRoot bool     // run through sudo when not root
+	lists    []string // package list base names this manager reads
 }
 
-// DetectManager detects the available package manager.
-func DetectManager() Manager {
-	candidates := []Manager{
-		&Pacman{},
-		&Paru{},
-		&Yay{},
-		&Apt{},
-		&Dnf{},
-		&Zypper{},
-		&Nix{},
-	}
+var managers = []Manager{
+	// AUR helpers first: they handle repo packages too and call sudo themselves.
+	{name: "paru", bin: "paru", args: []string{"-S", "--noconfirm", "--needed"}, lists: []string{"pacman", "aur"}},
+	{name: "yay", bin: "yay", args: []string{"-S", "--noconfirm", "--needed"}, lists: []string{"pacman", "aur"}},
+	{name: "pacman", bin: "pacman", args: []string{"-S", "--noconfirm", "--needed"}, needRoot: true, lists: []string{"pacman"}},
+	{name: "apt", bin: "apt-get", args: []string{"install", "-y"}, needRoot: true, lists: []string{"apt"}},
+	{name: "dnf", bin: "dnf", args: []string{"install", "-y"}, needRoot: true, lists: []string{"dnf"}},
+	{name: "zypper", bin: "zypper", args: []string{"--non-interactive", "install"}, needRoot: true, lists: []string{"zypper"}},
+	{name: "nix", bin: "nix", args: []string{"profile", "install"}, lists: []string{"nix"}},
+}
 
-	for _, m := range candidates {
-		if m.Available() {
-			return m
+// Hooks for tests.
+var (
+	lookPath = exec.LookPath
+	geteuid  = os.Geteuid
+	run      = func(name string, args ...string) error {
+		cmd := exec.Command(name, args...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+)
+
+// DetectManager returns the first available package manager, or nil.
+func DetectManager() *Manager {
+	for i := range managers {
+		if _, err := lookPath(managers[i].bin); err == nil {
+			m := managers[i]
+			return &m
 		}
 	}
-
 	return nil
 }
 
-// LoadPackages reads a package list file.
-// Lines starting with # are comments. Empty lines are ignored.
+// Name returns the display name of the package manager.
+func (m *Manager) Name() string { return m.name }
+
+// Command returns the command line that installs pkgs.
+func (m *Manager) Command(pkgs []string) []string {
+	cmd := append([]string{m.bin}, m.args...)
+	if m.needRoot && geteuid() != 0 {
+		cmd = append([]string{"sudo"}, cmd...)
+	}
+	return append(cmd, pkgs...)
+}
+
+// Install installs pkgs.
+func (m *Manager) Install(pkgs []string) error {
+	if len(pkgs) == 0 {
+		return nil
+	}
+	if err := ValidateNames(pkgs); err != nil {
+		return err
+	}
+	cmd := m.Command(pkgs)
+	return run(cmd[0], cmd[1:]...)
+}
+
+// ListFiles returns the package list files in the given layer directories
+// that this manager reads, and the ones it ignores.
+func (m *Manager) ListFiles(layerDirs []string) (used, ignored []string) {
+	wanted := map[string]bool{}
+	for _, l := range m.lists {
+		wanted[l] = true
+	}
+	for _, dir := range layerDirs {
+		pkgDir := filepath.Join(dir, "packages")
+		entries, err := os.ReadDir(pkgDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			base := strings.TrimSuffix(strings.TrimSuffix(e.Name(), ".txt"), ".list")
+			path := filepath.Join(pkgDir, e.Name())
+			if wanted[strings.ToLower(base)] {
+				used = append(used, path)
+			} else {
+				ignored = append(ignored, path)
+			}
+		}
+	}
+	return used, ignored
+}
+
+// LoadPackages reads a package list file. Lines starting with # are
+// comments; text after " #" is a trailing comment.
 func LoadPackages(path string) ([]string, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -58,153 +124,31 @@ func LoadPackages(path string) ([]string, error) {
 	var pkgs []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		pkgs = append(pkgs, line)
-	}
-
-	return pkgs, scanner.Err()
-}
-
-// FindPackageFiles finds all package list files in resolved layers.
-// layersDir should point to the layers/ directory (e.g., repoRoot/layers).
-func FindPackageFiles(layersDir string, layerPaths []string) []string {
-	var files []string
-	for _, layer := range layerPaths {
-		// Search for packages/ directory in each layer
-		pkgDir := filepath.Join(layersDir, layer, "packages")
-		entries, err := os.ReadDir(pkgDir)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				ext := strings.ToLower(filepath.Ext(entry.Name()))
-				if ext == ".txt" || ext == ".list" || ext == "" {
-					files = append(files, filepath.Join(pkgDir, entry.Name()))
-				}
+		// "#" starts a comment only at the start of a word, so nix
+		// references like nixpkgs#ripgrep survive.
+		for _, field := range strings.Fields(scanner.Text()) {
+			if strings.HasPrefix(field, "#") {
+				break
 			}
+			pkgs = append(pkgs, field)
 		}
 	}
-	return files
-}
-
-// --- Pacman ---
-
-// Pacman implements Manager for Arch Linux pacman.
-type Pacman struct{}
-
-func (p *Pacman) Name() string    { return "pacman" }
-func (p *Pacman) Available() bool { return which("pacman") }
-func (p *Pacman) Install(pkgs []string) error {
-	return runCmd("pacman", append([]string{"-S", "--noconfirm", "--needed"}, pkgs...)...)
-}
-func (p *Pacman) InstallOne(pkg string) error {
-	return p.Install([]string{pkg})
-}
-
-// --- Paru ---
-
-// Paru implements Manager for paru (AUR helper).
-type Paru struct{}
-
-func (p *Paru) Name() string    { return "paru" }
-func (p *Paru) Available() bool { return which("paru") }
-func (p *Paru) Install(pkgs []string) error {
-	return runCmd("paru", append([]string{"-S", "--noconfirm", "--needed"}, pkgs...)...)
-}
-func (p *Paru) InstallOne(pkg string) error {
-	return p.Install([]string{pkg})
-}
-
-// --- Yay ---
-
-// Yay implements Manager for yay (AUR helper).
-type Yay struct{}
-
-func (y *Yay) Name() string    { return "yay" }
-func (y *Yay) Available() bool { return which("yay") }
-func (y *Yay) Install(pkgs []string) error {
-	return runCmd("yay", append([]string{"-S", "--noconfirm", "--needed"}, pkgs...)...)
-}
-func (y *Yay) InstallOne(pkg string) error {
-	return y.Install([]string{pkg})
-}
-
-// --- Apt ---
-
-// Apt implements Manager for Debian/Ubuntu apt.
-type Apt struct{}
-
-func (a *Apt) Name() string    { return "apt" }
-func (a *Apt) Available() bool { return which("apt-get") }
-func (a *Apt) Install(pkgs []string) error {
-	return runCmd("apt-get", append([]string{"install", "-y"}, pkgs...)...)
-}
-func (a *Apt) InstallOne(pkg string) error {
-	return a.Install([]string{pkg})
-}
-
-// --- Dnf ---
-
-// Dnf implements Manager for Fedora dnf.
-type Dnf struct{}
-
-func (d *Dnf) Name() string    { return "dnf" }
-func (d *Dnf) Available() bool { return which("dnf") }
-func (d *Dnf) Install(pkgs []string) error {
-	return runCmd("dnf", append([]string{"install", "-y"}, pkgs...)...)
-}
-func (d *Dnf) InstallOne(pkg string) error {
-	return d.Install([]string{pkg})
-}
-
-// --- Zypper ---
-
-// Zypper implements Manager for openSUSE zypper.
-type Zypper struct{}
-
-func (z *Zypper) Name() string    { return "zypper" }
-func (z *Zypper) Available() bool { return which("zypper") }
-func (z *Zypper) Install(pkgs []string) error {
-	return runCmd("zypper", append([]string{"install", "-y"}, pkgs...)...)
-}
-func (z *Zypper) InstallOne(pkg string) error {
-	return z.Install([]string{pkg})
-}
-
-// --- Nix ---
-
-// Nix implements Manager for NixOS nix-env / nix profile.
-type Nix struct{}
-
-func (n *Nix) Name() string    { return "nix" }
-func (n *Nix) Available() bool { return which("nix-env") || which("nix") }
-func (n *Nix) Install(pkgs []string) error {
-	// Try nix profile install first, fall back to nix-env
-	if which("nix") {
-		return runCmd("nix", append([]string{"profile", "install"}, pkgs...)...)
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
-	return runCmd("nix-env", append([]string{"-iA"}, pkgs...)...)
-}
-func (n *Nix) InstallOne(pkg string) error {
-	return n.Install([]string{pkg})
-}
-
-// --- Helpers ---
-
-// which checks if a command is available in PATH.
-func which(cmd string) bool {
-	_, err := exec.LookPath(cmd)
-	return err == nil
+	if err := ValidateNames(pkgs); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return pkgs, nil
 }
 
-// runCmd runs a command and streams output to stderr.
-func runCmd(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+// ValidateNames rejects names that the package manager would read as
+// options.
+func ValidateNames(pkgs []string) error {
+	for _, p := range pkgs {
+		if strings.HasPrefix(p, "-") {
+			return fmt.Errorf("invalid package name %q (must not start with '-')", p)
+		}
+	}
+	return nil
 }

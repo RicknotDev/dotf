@@ -3,6 +3,8 @@ package profile
 
 import (
 	"fmt"
+	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -73,15 +75,18 @@ func (p Profile) ResolvedLayers(layersDir string) []Layer {
 		layersDir = "layers"
 	}
 
-	// Helper to append a layer if the name is non-empty
+	// Helper to append a layer if the name is a valid layer name. Names come
+	// from the environment (hostname, $SHELL, $XDG_CURRENT_DESKTOP...), so
+	// anything that could escape the layers directory is dropped.
 	add := func(lt LayerType, name string) {
+		name = SafeName(name)
 		if name == "" {
 			return
 		}
 		layers = append(layers, Layer{
 			Type:    lt,
 			Name:    name,
-			DirPath: fmt.Sprintf("%s/%s/%s", layersDir, lt, strings.ToLower(name)),
+			DirPath: filepath.Join(layersDir, string(lt), name),
 		})
 	}
 
@@ -89,7 +94,7 @@ func (p Profile) ResolvedLayers(layersDir string) []Layer {
 	layers = append(layers, Layer{
 		Type:    LayerBase,
 		Name:    "",
-		DirPath: fmt.Sprintf("%s/base", layersDir),
+		DirPath: filepath.Join(layersDir, "base"),
 	})
 
 	add(LayerDistro, p.Distro)
@@ -102,6 +107,45 @@ func (p Profile) ResolvedLayers(layersDir string) []Layer {
 	add(LayerHost, p.Hostname)
 
 	return layers
+}
+
+var safeNameRe = regexp.MustCompile(`^[a-z0-9_][a-z0-9._+_-]*$`)
+
+// SafeName lowercases a layer name and returns "" if it is not a plain
+// single path component (no "/", no "..", no leading dot or dash).
+func SafeName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if len(name) > 64 || !safeNameRe.MatchString(name) || strings.Contains(name, "..") {
+		return ""
+	}
+	return name
+}
+
+// ParseLayerPath parses "base" or "<type>/<name>" into a layer type and name.
+func ParseLayerPath(p string) (LayerType, string, error) {
+	p = strings.Trim(strings.TrimSpace(p), "/")
+	if p == "base" {
+		return LayerBase, "", nil
+	}
+	parts := strings.Split(p, "/")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid layer %q (want base or <type>/<name>)", p)
+	}
+	lt := LayerType(parts[0])
+	known := false
+	for _, t := range AllLayerTypes() {
+		if t == lt && t != LayerBase {
+			known = true
+		}
+	}
+	if !known {
+		return "", "", fmt.Errorf("invalid layer %q: unknown type %q", p, parts[0])
+	}
+	name := SafeName(parts[1])
+	if name == "" {
+		return "", "", fmt.Errorf("invalid layer %q: bad name %q", p, parts[1])
+	}
+	return lt, name, nil
 }
 
 // String returns a human-readable representation of the profile.

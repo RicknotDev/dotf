@@ -1,10 +1,26 @@
-// Package transaction provides atomic operations with write-ahead logging
-// and automatic rollback for DOTF. All mutating filesystem operations
-// must go through this package to ensure crash safety.
+// Package transaction makes a group of filesystem changes all-or-nothing.
+//
+// Every change is recorded in an append-only journal (one JSON object per
+// line) before it is made. Each entry records what was at the path before:
+// nothing, a symlink (and its target), or a regular file (copied into the
+// transaction's stash directory together with its mode). Rollback undoes
+// every entry of the transaction in reverse order and puts back what was
+// there before. Commit appends a "commit" line and deletes the journal; a
+// journal found on disk without a commit line belongs to an interrupted run
+// and is rolled back by Recover.
+//
+// Files are replaced atomically: the new content is created under a
+// temporary name in the target directory and renamed over the target.
 package transaction
 
 import (
+	"bufio"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,290 +28,518 @@ import (
 	"time"
 )
 
-// OpType represents a type of filesystem operation.
+// OpType is the kind of a journaled operation.
 type OpType string
 
 const (
-	OpSymlink OpType = "SYMLINK"
-	OpCopy    OpType = "COPY"
-	OpMkdir   OpType = "MKDIR"
-	OpRemove  OpType = "REMOVE"
-	OpBackup  OpType = "BACKUP"
+	OpBegin   OpType = "begin"
+	OpSymlink OpType = "symlink"
+	OpWrite   OpType = "write" // copy, secret, restore: a regular file is placed at Path
+	OpRemove  OpType = "remove"
+	OpMkdir   OpType = "mkdir"
+	OpCommit  OpType = "commit"
 )
 
-// Operation represents a single logged operation.
-type Operation struct {
-	Type      OpType `json:"type"`
-	Path      string `json:"path"`
-	Target    string `json:"target,omitempty"` // symlink target or backup path
-	Timestamp string `json:"timestamp"`
-	Committed bool   `json:"committed"`
+// PriorKind describes what existed at a path before an operation.
+type PriorKind string
+
+const (
+	PriorNone    PriorKind = "none"
+	PriorSymlink PriorKind = "symlink"
+	PriorFile    PriorKind = "file"
+)
+
+// Entry is one journal line.
+type Entry struct {
+	Op   OpType `json:"op"`
+	Seq  int    `json:"seq,omitempty"`
+	Path string `json:"path,omitempty"`
+	Tmp  string `json:"tmp,omitempty"` // temporary name renamed onto Path
+
+	Prior       PriorKind   `json:"prior,omitempty"`
+	PriorTarget string      `json:"prior_target,omitempty"` // symlink target
+	PriorStash  string      `json:"prior_stash,omitempty"`  // stashed copy of a regular file
+	PriorMode   os.FileMode `json:"prior_mode,omitempty"`
+
+	ID   string `json:"id,omitempty"`
+	Time string `json:"time,omitempty"`
 }
 
-// Transaction provides atomic filesystem operations with rollback.
+// Transaction groups filesystem operations so they can be undone together.
 type Transaction struct {
-	mu        sync.Mutex
-	journal   []Operation
-	stateDir  string
-	journalID string
-	completed bool
+	mu       sync.Mutex
+	stateDir string
+	id       string
+	dir      string // <stateDir>/transactions/<id>
+	journal  *os.File
+	entries  []Entry
+	done     bool
 }
 
-// New creates a new transaction.
+// TxDirName is the subdirectory of the state directory holding journals.
+const TxDirName = "transactions"
+
+// New creates a transaction. Nothing is written to disk until the first
+// operation.
 func New(stateDir string) (*Transaction, error) {
-	if err := os.MkdirAll(stateDir, 0755); err != nil {
-		return nil, fmt.Errorf("cannot create transaction directory: %w", err)
+	if stateDir == "" {
+		return nil, errors.New("transaction: empty state directory")
 	}
-
-	journalID := fmt.Sprintf("dotf-%d", time.Now().UnixNano())
-
-	tx := &Transaction{
-		stateDir:  stateDir,
-		journalID: journalID,
-	}
-
-	return tx, nil
+	var rnd [4]byte
+	rand.Read(rnd[:])
+	id := fmt.Sprintf("%d-%s", time.Now().UnixNano(), hex.EncodeToString(rnd[:]))
+	return &Transaction{
+		stateDir: stateDir,
+		id:       id,
+		dir:      filepath.Join(stateDir, TxDirName, id),
+	}, nil
 }
 
-// journalPath returns the path to the journal file.
-func (tx *Transaction) journalPath() string {
-	return filepath.Join(tx.stateDir, tx.journalID+".journal")
-}
+// ID returns the transaction identifier.
+func (tx *Transaction) ID() string { return tx.id }
 
-// logOperation writes an operation to the write-ahead journal.
-func (tx *Transaction) logOperation(op OpType, path, target string) {
+// JournalPath returns the path of the journal file.
+func (tx *Transaction) JournalPath() string { return filepath.Join(tx.dir, "journal") }
+
+// Len returns the number of journaled operations.
+func (tx *Transaction) Len() int {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
-
-	entry := Operation{
-		Type:      op,
-		Path:      path,
-		Target:    target,
-		Timestamp: time.Now().Format(time.RFC3339Nano),
-		Committed: false,
-	}
-	tx.journal = append(tx.journal, entry)
-	tx.flushJournal()
+	return len(tx.entries)
 }
 
-// commitOperation marks an operation as committed.
-func (tx *Transaction) commitOperation(index int) {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-
-	if index < len(tx.journal) {
-		tx.journal[index].Committed = true
+func (tx *Transaction) open() error {
+	if tx.done {
+		return errors.New("transaction already finished")
 	}
-	tx.flushJournal()
-}
-
-// flushJournal writes the journal to disk.
-func (tx *Transaction) flushJournal() {
-	data := strings.Builder{}
-	for _, op := range tx.journal {
-		status := "PENDING"
-		if op.Committed {
-			status = "DONE"
-		}
-		data.WriteString(fmt.Sprintf("%s|%s|%s|%s|%s\n",
-			status, op.Type, op.Path, op.Target, op.Timestamp))
+	if tx.journal != nil {
+		return nil
 	}
-
-	jPath := tx.journalPath()
-	tmpPath := jPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(data.String()), 0644); err != nil {
-		return // best effort
+	if err := os.MkdirAll(tx.dir, 0o700); err != nil {
+		return fmt.Errorf("cannot create transaction directory: %w", err)
 	}
-	if err := os.Rename(tmpPath, jPath); err != nil {
-		os.Remove(tmpPath) // clean up temp file on rename failure
-	}
-}
-
-// Symlink performs an atomic symlink creation within the transaction.
-func (tx *Transaction) Symlink(source, target string) error {
-	idx := len(tx.journal)
-	tx.logOperation(OpSymlink, target, source)
-
-	if err := os.Symlink(source, target); err != nil {
-		tx.Rollback()
-		return fmt.Errorf("symlink %s -> %s: %w", target, source, err)
-	}
-
-	tx.commitOperation(idx)
-	return nil
-}
-
-// Copy performs an atomic file copy within the transaction.
-func (tx *Transaction) Copy(source, target string) error {
-	idx := len(tx.journal)
-	tx.logOperation(OpCopy, target, source)
-
-	data, err := os.ReadFile(source)
+	f, err := os.OpenFile(tx.JournalPath(), os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
 	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("read %s: %w", source, err)
+		return fmt.Errorf("cannot create journal: %w", err)
 	}
-
-	// Write to temp file then rename for atomicity
-	tmpPath := target + ".dotf-tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		tx.Rollback()
-		return fmt.Errorf("write temp %s: %w", tmpPath, err)
-	}
-
-	if err := os.Rename(tmpPath, target); err != nil {
-		os.Remove(tmpPath)
-		tx.Rollback()
-		return fmt.Errorf("rename %s -> %s: %w", tmpPath, target, err)
-	}
-
-	tx.commitOperation(idx)
-	return nil
+	tx.journal = f
+	return tx.appendLine(Entry{Op: OpBegin, ID: tx.id, Time: time.Now().Format(time.RFC3339Nano)})
 }
 
-// Remove removes a file within the transaction.
-func (tx *Transaction) Remove(path string) error {
-	idx := len(tx.journal)
-	tx.logOperation(OpRemove, path, "")
-
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		tx.Rollback()
-		return fmt.Errorf("remove %s: %w", path, err)
-	}
-
-	tx.commitOperation(idx)
-	return nil
-}
-
-// Rollback undoes all uncommitted operations.
-func (tx *Transaction) Rollback() {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-
-	// Walk journal in reverse
-	for i := len(tx.journal) - 1; i >= 0; i-- {
-		op := tx.journal[i]
-
-		switch op.Type {
-		case OpSymlink:
-			// Remove the symlink we created
-			if !op.Committed {
-				os.Remove(op.Path)
-			}
-		case OpCopy:
-			// Remove the file we copied
-			if !op.Committed {
-				os.Remove(op.Path)
-			}
-		case OpMkdir:
-			// We don't remove directories on rollback (safety)
-		case OpRemove:
-			// Can't undo a remove without a backup reference
-			// Backups should be created before removes in the journal
-		case OpBackup:
-			// Backups are preserved even on rollback
-		}
-	}
-
-	tx.journal = nil
-	tx.completed = true
-	tx.cleanupJournal()
-}
-
-// Commit finalizes the transaction.
-func (tx *Transaction) Commit() error {
-	// Mark all operations as committed
-	tx.mu.Lock()
-	for i := range tx.journal {
-		tx.journal[i].Committed = true
-	}
-	tx.completed = true
-	tx.mu.Unlock()
-
-	tx.flushJournal()
-	tx.cleanupJournal()
-	return nil
-}
-
-// cleanupJournal removes the journal file after successful completion.
-func (tx *Transaction) cleanupJournal() {
-	os.Remove(tx.journalPath())
-}
-
-// RecoverIncomplete checks for incomplete transactions and rolls them back.
-func RecoverIncomplete(stateDir string) error {
-	entries, err := os.ReadDir(stateDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("cannot read state directory: %w", err)
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".journal") {
-			continue
-		}
-
-		journalPath := filepath.Join(stateDir, entry.Name())
-		if err := recoverJournal(journalPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: incomplete transaction recovered: %s\n", journalPath)
-		}
-	}
-
-	return nil
-}
-
-// recoverJournal reads a journal file and rolls back any uncommitted operations.
-func recoverJournal(journalPath string) error {
-	data, err := os.ReadFile(journalPath)
+func (tx *Transaction) appendLine(e Entry) error {
+	b, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
+	b = append(b, '\n')
+	if _, err := tx.journal.Write(b); err != nil {
+		return fmt.Errorf("cannot write journal: %w", err)
+	}
+	if err := tx.journal.Sync(); err != nil {
+		return fmt.Errorf("cannot sync journal: %w", err)
+	}
+	return nil
+}
 
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
-		os.Remove(journalPath)
+// record captures what currently exists at path and journals the entry.
+func (tx *Transaction) record(e Entry) (Entry, error) {
+	if err := tx.open(); err != nil {
+		return e, err
+	}
+	e.Seq = len(tx.entries) + 1
+	if e.Op != OpMkdir {
+		info, err := os.Lstat(e.Path)
+		switch {
+		case os.IsNotExist(err):
+			e.Prior = PriorNone
+		case err != nil:
+			return e, fmt.Errorf("cannot stat %s: %w", e.Path, err)
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(e.Path)
+			if err != nil {
+				return e, fmt.Errorf("cannot read symlink %s: %w", e.Path, err)
+			}
+			e.Prior, e.PriorTarget = PriorSymlink, target
+		case info.Mode().IsRegular():
+			stash := filepath.Join(tx.dir, fmt.Sprintf("%d.prior", e.Seq))
+			if err := copyFile(e.Path, stash, info.Mode().Perm()); err != nil {
+				return e, fmt.Errorf("cannot save previous %s: %w", e.Path, err)
+			}
+			e.Prior, e.PriorStash, e.PriorMode = PriorFile, stash, info.Mode().Perm()
+		default:
+			return e, fmt.Errorf("refusing to replace %s: not a regular file or symlink", e.Path)
+		}
+	}
+	if err := tx.appendLine(e); err != nil {
+		return e, err
+	}
+	tx.entries = append(tx.entries, e)
+	return e, nil
+}
+
+func (tx *Transaction) tmpName(target string) string {
+	var rnd [4]byte
+	rand.Read(rnd[:])
+	return filepath.Join(filepath.Dir(target),
+		fmt.Sprintf(".%s.dotf-tmp-%s", filepath.Base(target), hex.EncodeToString(rnd[:])))
+}
+
+// Symlink atomically makes target a symlink to source.
+func (tx *Transaction) Symlink(source, target string) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	e, err := tx.record(Entry{Op: OpSymlink, Path: target, Tmp: tx.tmpName(target)})
+	if err != nil {
+		return err
+	}
+	if err := os.Symlink(source, e.Tmp); err != nil {
+		return fmt.Errorf("symlink %s -> %s: %w", target, source, err)
+	}
+	if err := os.Rename(e.Tmp, target); err != nil {
+		os.Remove(e.Tmp)
+		return fmt.Errorf("rename %s: %w", target, err)
+	}
+	return nil
+}
+
+// Copy atomically places a copy of source at target, keeping source's mode.
+func (tx *Transaction) Copy(source, target string) error {
+	info, err := os.Stat(source)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", source, err)
+	}
+	return tx.WriteFile(target, info.Mode().Perm(), func(w io.Writer) error {
+		f, err := os.Open(source)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = io.Copy(w, f)
+		return err
+	})
+}
+
+// WriteFile atomically places a regular file with the given mode at target.
+// write is called with the temporary file, which is already created with
+// mode, so secrets are never readable by others, not even briefly.
+func (tx *Transaction) WriteFile(target string, mode os.FileMode, write func(io.Writer) error) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	e, err := tx.record(Entry{Op: OpWrite, Path: target, Tmp: tx.tmpName(target)})
+	if err != nil {
+		return err
+	}
+	// Created owner-only; the final mode is applied after the content is written.
+	f, err := os.OpenFile(e.Tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", e.Tmp, err)
+	}
+	werr := write(f)
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(e.Tmp, mode.Perm())
+	}
+	if werr != nil {
+		os.Remove(e.Tmp)
+		return fmt.Errorf("write %s: %w", target, werr)
+	}
+	if err := os.Rename(e.Tmp, target); err != nil {
+		os.Remove(e.Tmp)
+		return fmt.Errorf("rename %s: %w", target, err)
+	}
+	return nil
+}
+
+// Remove removes path (a file or symlink). A missing path is not an error.
+func (tx *Transaction) Remove(path string) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
 		return nil
 	}
+	if _, err := tx.record(Entry{Op: OpRemove, Path: path}); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return nil
+}
 
-	// Walk in reverse, rolling back PENDING operations
-	for i := len(lines) - 1; i >= 0; i-- {
-		parts := strings.SplitN(lines[i], "|", 5)
-		if len(parts) < 4 {
+// MkdirAll creates dir and any missing parents, journaling each directory it
+// creates so rollback can remove them again (if they are still empty).
+func (tx *Transaction) MkdirAll(dir string, perm os.FileMode) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	var missing []string
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		info, err := os.Stat(d)
+		if err == nil {
+			if !info.IsDir() {
+				return fmt.Errorf("%s exists and is not a directory", d)
+			}
+			break
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		missing = append(missing, d)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		if _, err := tx.record(Entry{Op: OpMkdir, Path: missing[i]}); err != nil {
+			return err
+		}
+		if err := os.Mkdir(missing[i], perm); err != nil && !os.IsExist(err) {
+			return fmt.Errorf("mkdir %s: %w", missing[i], err)
+		}
+	}
+	return nil
+}
+
+// Commit finalizes the transaction and deletes its journal and stash.
+func (tx *Transaction) Commit() error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.done {
+		return nil
+	}
+	tx.done = true
+	if tx.journal == nil {
+		return nil // nothing was done
+	}
+	err := tx.appendLine(Entry{Op: OpCommit, Time: time.Now().Format(time.RFC3339Nano)})
+	tx.journal.Close()
+	tx.journal = nil
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(tx.dir)
+}
+
+// Rollback undoes every operation of the transaction, newest first, and
+// restores what existed before. If something cannot be restored the journal
+// is kept so `dotf doctor --fix` can retry.
+func (tx *Transaction) Rollback() error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.done {
+		return nil
+	}
+	tx.done = true
+	if tx.journal == nil {
+		return nil
+	}
+	tx.journal.Close()
+	tx.journal = nil
+	if err := undo(tx.entries, nil); err != nil {
+		return err
+	}
+	return os.RemoveAll(tx.dir)
+}
+
+// undo reverts entries in reverse order.
+func undo(entries []Entry, log io.Writer) error {
+	var errs []error
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if e.Tmp != "" {
+			os.Remove(e.Tmp)
+		}
+		var err error
+		switch e.Op {
+		case OpMkdir:
+			os.Remove(e.Path) // only succeeds if empty
+			continue
+		case OpSymlink, OpWrite, OpRemove:
+			err = restorePrior(e)
+		default:
 			continue
 		}
-
-		status := parts[0]
-		opType := OpType(parts[1])
-		path := parts[2]
-		target := parts[3]
-
-		if status == "DONE" {
-			continue // already committed, don't touch
+		if err != nil {
+			errs = append(errs, err)
+		} else if log != nil {
+			fmt.Fprintf(log, "  restored %s\n", e.Path)
 		}
+	}
+	return errors.Join(errs...)
+}
 
-		// Rollback PENDING operation
-		switch opType {
-		case OpSymlink:
-			if _, err := os.Lstat(path); err == nil {
-				os.Remove(path)
-				fmt.Fprintf(os.Stderr, "  recovered: removed incomplete symlink %s\n", path)
-			}
-		case OpCopy:
-			if _, err := os.Lstat(path); err == nil {
-				os.Remove(path)
-				fmt.Fprintf(os.Stderr, "  recovered: removed incomplete copy %s\n", path)
-			}
-		case OpBackup:
-			// Backup was created — check if original still exists
-			if _, err := os.Lstat(target); err != nil {
-				// Original was modified, but backup exists — preserved
-				fmt.Fprintf(os.Stderr, "  recovered: backup preserved %s\n", target)
+func restorePrior(e Entry) error {
+	switch e.Prior {
+	case PriorNone:
+		if err := os.Remove(e.Path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("cannot remove %s: %w", e.Path, err)
+		}
+	case PriorSymlink:
+		if cur, err := os.Readlink(e.Path); err == nil && cur == e.PriorTarget {
+			return nil
+		}
+		tmp := e.Path + ".dotf-rollback"
+		os.Remove(tmp)
+		if err := os.Symlink(e.PriorTarget, tmp); err != nil {
+			return fmt.Errorf("cannot restore symlink %s: %w", e.Path, err)
+		}
+		if err := os.Rename(tmp, e.Path); err != nil {
+			os.Remove(tmp)
+			return fmt.Errorf("cannot restore symlink %s: %w", e.Path, err)
+		}
+	case PriorFile:
+		tmp := e.Path + ".dotf-rollback"
+		os.Remove(tmp)
+		if err := copyFile(e.PriorStash, tmp, e.PriorMode); err != nil {
+			return fmt.Errorf("cannot restore %s: %w", e.Path, err)
+		}
+		if err := os.Rename(tmp, e.Path); err != nil {
+			os.Remove(tmp)
+			return fmt.Errorf("cannot restore %s: %w", e.Path, err)
+		}
+	}
+	return nil
+}
+
+// Pending returns the journal paths of interrupted transactions.
+func Pending(stateDir string) []string {
+	var out []string
+	dirs, _ := os.ReadDir(filepath.Join(stateDir, TxDirName))
+	for _, d := range dirs {
+		if d.IsDir() {
+			p := filepath.Join(stateDir, TxDirName, d.Name(), "journal")
+			if _, err := os.Stat(p); err == nil {
+				out = append(out, p)
 			}
 		}
 	}
+	legacy, _ := filepath.Glob(filepath.Join(stateDir, "*.journal"))
+	return append(out, legacy...)
+}
 
-	os.Remove(journalPath)
-	return nil
+// RecoverIncomplete rolls back every interrupted transaction in stateDir,
+// writing progress to stderr. The caller must hold the DOTF lock.
+func RecoverIncomplete(stateDir string) error {
+	_, err := Recover(stateDir, os.Stderr)
+	return err
+}
+
+// Recover rolls back interrupted transactions and returns how many were
+// found. Journals that end in a commit line are simply removed.
+func Recover(stateDir string, log io.Writer) (int, error) {
+	var errs []error
+	n := 0
+	for _, jp := range Pending(stateDir) {
+		n++
+		if strings.HasSuffix(jp, ".journal") {
+			recoverLegacy(jp, log)
+			continue
+		}
+		entries, committed, err := readJournal(jp)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", jp, err))
+			continue
+		}
+		dir := filepath.Dir(jp)
+		if committed {
+			os.RemoveAll(dir)
+			continue
+		}
+		if log != nil {
+			fmt.Fprintf(log, "Rolling back interrupted transaction %s\n", filepath.Base(dir))
+		}
+		if err := undo(entries, log); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		os.RemoveAll(dir)
+	}
+	return n, errors.Join(errs...)
+}
+
+func readJournal(path string) ([]Entry, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	var entries []Entry
+	committed := false
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var e Entry
+		if err := json.Unmarshal(line, &e); err != nil {
+			// A torn last line means the process died while writing it;
+			// the operation it describes never started.
+			break
+		}
+		switch e.Op {
+		case OpCommit:
+			committed = true
+		case OpBegin:
+		default:
+			entries = append(entries, e)
+		}
+	}
+	return entries, committed, sc.Err()
+}
+
+// recoverLegacy handles journals written by dotf <= 0.6 ("STATUS|TYPE|path|target|time").
+// Those journals cannot restore previous content; incomplete symlinks and
+// copies are removed as before.
+func recoverLegacy(path string, log io.Writer) {
+	data, err := os.ReadFile(path)
+	if err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			parts := strings.SplitN(line, "|", 5)
+			if len(parts) < 4 || parts[0] == "DONE" {
+				continue
+			}
+			if parts[1] == "SYMLINK" || parts[1] == "COPY" {
+				if _, err := os.Lstat(parts[2]); err == nil {
+					os.Remove(parts[2])
+					if log != nil {
+						fmt.Fprintf(log, "  removed incomplete %s\n", parts[2])
+					}
+				}
+			}
+		}
+	}
+	os.Remove(path)
+}
+
+// copyFile copies src to dst (which must not exist) and sets mode.
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(out, in)
+	if err == nil {
+		err = out.Sync()
+	}
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(dst, mode.Perm())
+	}
+	if err != nil {
+		os.Remove(dst)
+	}
+	return err
 }

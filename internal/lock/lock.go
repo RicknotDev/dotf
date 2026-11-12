@@ -1,16 +1,23 @@
 // Package lock provides cross-process locking for DOTF operations.
-// Prevents concurrent installs, updates, restores, and migrations.
+//
+// The lock is an advisory flock(2) on <stateDir>/dotf.lock. The kernel
+// releases it when the holding process exits, so there is no "stale lock"
+// guessing based on PIDs: if nobody holds the flock, the lock is free. The
+// PID/hostname written into the file are informational only.
 package lock
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
+
+// LockFile is the name of the lock file.
+const LockFile = "dotf.lock"
 
 // Lock represents an acquired file lock.
 type Lock struct {
@@ -18,130 +25,125 @@ type Lock struct {
 	file *os.File
 }
 
-// LockFile is the name of the lock file.
-const LockFile = "dotf.lock"
-
-// Acquire creates a lock for the given state directory.
-// Blocks up to timeout trying to acquire the lock.
+// Acquire takes the exclusive lock for the given state directory, waiting up
+// to timeout for another process to release it.
 func Acquire(stateDir string, timeout time.Duration) (*Lock, error) {
-	if err := os.MkdirAll(stateDir, 0755); err != nil {
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("cannot create state directory: %w", err)
 	}
-
 	lockPath := filepath.Join(stateDir, LockFile)
-
 	deadline := time.Now().Add(timeout)
+
 	for {
-		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0644)
+		f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("cannot open lock file: %w", err)
+		}
+
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
-			// Write PID and hostname to lock file
-			hostname, _ := os.Hostname()
-			content := fmt.Sprintf("%d\n%s\n%s\n", os.Getpid(), hostname, time.Now().Format(time.RFC3339))
-			if _, err := file.WriteString(content); err != nil {
-				file.Close()
-				os.Remove(lockPath)
-				return nil, fmt.Errorf("cannot write lock file: %w", err)
+			// A previous holder may have unlinked the file between our open
+			// and our flock. If the path no longer refers to the inode we
+			// locked, start over with the new file.
+			if sameFile(f, lockPath) {
+				l := &Lock{path: lockPath, file: f}
+				l.writeHolder()
+				return l, nil
 			}
-			if err := file.Sync(); err != nil {
-				file.Close()
-				os.Remove(lockPath)
-				return nil, fmt.Errorf("cannot sync lock file: %w", err)
-			}
-			return &Lock{path: lockPath, file: file}, nil
-		}
-
-		if !os.IsExist(err) {
-			return nil, fmt.Errorf("cannot acquire lock: %w", err)
-		}
-
-		// Lock exists — check if stale
-		if isStaleLock(lockPath) {
-			os.Remove(lockPath)
+			f.Close()
 			continue
 		}
+		f.Close()
 
-		if time.Now().After(deadline) {
-			// Read who holds the lock for the error message
-			holder := readLockHolder(lockPath)
-			return nil, fmt.Errorf("lock held by %s (timeout after %v)", holder, timeout)
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			return nil, fmt.Errorf("cannot lock %s: %w", lockPath, err)
 		}
-
-		time.Sleep(200 * time.Millisecond)
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("lock held by %s (timeout after %v)", readLockHolder(lockPath), timeout)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
-// Release releases the lock.
+// Release removes the lock file and drops the lock. The file is unlinked
+// while still locked, so a waiter that opened the old inode notices the
+// mismatch in Acquire and retries.
 func (l *Lock) Release() {
-	if l.file != nil {
-		l.file.Close()
-		l.file = nil
+	if l == nil || l.file == nil {
+		return
 	}
-	if l.path != "" {
-		os.Remove(l.path)
-		l.path = ""
-	}
+	os.Remove(l.path)
+	syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+	l.file.Close()
+	l.file = nil
 }
 
-// ForceRelease removes a stale lock file without validation.
-func ForceRelease(stateDir string) error {
-	lockPath := filepath.Join(stateDir, LockFile)
-	return os.Remove(lockPath)
-}
-
-// IsLocked checks if a lock exists and is valid.
+// IsLocked reports whether a live process currently holds the lock.
 func IsLocked(stateDir string) bool {
-	lockPath := filepath.Join(stateDir, LockFile)
-	_, err := os.Stat(lockPath)
+	f, err := os.OpenFile(filepath.Join(stateDir, LockFile), os.O_RDONLY, 0)
 	if err != nil {
 		return false
 	}
-	return !isStaleLock(lockPath)
-}
-
-// LockHolder returns information about who holds the lock.
-func LockHolder(stateDir string) string {
-	lockPath := filepath.Join(stateDir, LockFile)
-	return readLockHolder(lockPath)
-}
-
-// isStaleLock checks if the lock file's PID is no longer running.
-func isStaleLock(lockPath string) bool {
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		return true // can't read, treat as stale
-	}
-
-	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
-	if len(lines) < 1 {
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		return true
 	}
-
-	pid, err := strconv.Atoi(strings.TrimSpace(lines[0]))
-	if err != nil {
-		return true // corrupted lock file
-	}
-
-	// Check if process exists by sending signal 0
-	// On Unix, os.FindProcess is a no-op, so we use syscall.Kill
-	if err := syscall.Kill(pid, syscall.Signal(0)); err != nil {
-		// Process doesn't exist — stale lock
-		return true
-	}
-
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return false
 }
 
-// readLockHolder reads the PID and hostname from a lock file for error messages.
+// ForceRelease removes a leftover lock file. It refuses when a live process
+// holds the lock, because removing the file would not stop that process and
+// would let a second one start alongside it.
+func ForceRelease(stateDir string) error {
+	if IsLocked(stateDir) {
+		return fmt.Errorf("lock is held by a running process (%s); stop it instead", LockHolder(stateDir))
+	}
+	err := os.Remove(filepath.Join(stateDir, LockFile))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// LockHolder returns the informational holder line written into the lock
+// file, or "unknown".
+func LockHolder(stateDir string) string {
+	return readLockHolder(filepath.Join(stateDir, LockFile))
+}
+
+func (l *Lock) writeHolder() {
+	hostname, _ := os.Hostname()
+	content := fmt.Sprintf("%d\n%s\n%s\n", os.Getpid(), hostname, time.Now().Format(time.RFC3339))
+	if err := l.file.Truncate(0); err != nil {
+		return
+	}
+	l.file.WriteAt([]byte(content), 0)
+	l.file.Sync()
+}
+
+func sameFile(f *os.File, path string) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	pi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(fi, pi)
+}
+
 func readLockHolder(lockPath string) string {
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		return "unknown"
 	}
-	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 3)
-	if len(lines) >= 2 {
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	switch {
+	case len(lines) >= 2 && lines[0] != "":
 		return fmt.Sprintf("PID %s on %s", strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]))
-	}
-	if len(lines) >= 1 {
+	case len(lines) == 1 && lines[0] != "":
 		return fmt.Sprintf("PID %s", strings.TrimSpace(lines[0]))
 	}
 	return "unknown"

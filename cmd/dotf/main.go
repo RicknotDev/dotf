@@ -2,95 +2,123 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/codebuff/dotf/internal/cli"
+	"github.com/RicknotDev/dotf/internal/cli"
 )
 
-// Version is set at build time via -ldflags -X main.Version=v0.6.0
+// Version is set at build time via -ldflags "-X main.Version=v0.7.0".
 var Version = "dev"
 
 func main() {
-	// Parse global flags and NO_COLOR early
-	if len(os.Args) < 2 {
-		printWelcome()
-		os.Exit(0)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run executes one dotf invocation and returns the exit code.
+//
+// Exit codes: 0 success, 1 error, 2 unresolved conflict, 3 nothing to do,
+// 64 usage error.
+func run(args []string, stdout, stderr io.Writer) int {
+	cfg, rest := cli.ParseGlobalFlags(args)
+	cfg.Stdout, cfg.Stderr = stdout, stderr
+	if f, ok := stdout.(*os.File); !ok || !cli.IsTerminal(f) {
+		cfg.NoColor = true
 	}
 
-	cmd := os.Args[1]
-	args := os.Args[2:]
-
-	// Determine state directory (XDG compliant)
+	if len(rest) == 0 {
+		printWelcome(stdout)
+		return cli.ExitOK
+	}
+	cmd, cmdArgs := rest[0], rest[1:]
 	stateDir := xdgStateDir()
-
-	// Parse global flags for all commands
-	globalCfg, cmdArgs := cli.ParseGlobalFlags(args)
-
-	// Exit codes:
-	// 0 = success
-	// 1 = general error
-	// 2 = conflict without resolution
-	// 3 = nothing to do
 
 	var err error
 	switch cmd {
 	case "install":
-		err = cli.Install(cmdArgs, stateDir)
+		err = cli.Install(cmdArgs, stateDir, cfg)
 	case "explain":
-		err = cli.Explain(cmdArgs)
+		err = cli.Explain(cmdArgs, stateDir, cfg)
 	case "doctor":
-		err = cli.Doctor(cmdArgs, stateDir)
+		err = cli.Doctor(cmdArgs, stateDir, cfg)
 	case "inspect":
-		err = cli.Inspect(cmdArgs, stateDir)
+		err = cli.Inspect(cmdArgs, stateDir, cfg)
 	case "restore":
-		err = cli.Restore(cmdArgs, stateDir)
+		err = cli.Restore(cmdArgs, stateDir, cfg)
 	case "status":
-		err = cli.Status(cmdArgs, stateDir, globalCfg)
+		err = cli.Status(cmdArgs, stateDir, cfg)
 	case "apply":
-		err = cli.Apply(cmdArgs, stateDir, globalCfg)
+		err = cli.Apply(cmdArgs, stateDir, cfg)
 	case "unapply":
-		err = cli.Unapply(cmdArgs, stateDir, globalCfg)
+		err = cli.Unapply(cmdArgs, stateDir, cfg)
 	case "help", "--help", "-h":
-		printUsage()
-		os.Exit(0)
+		fmt.Fprint(stdout, usage)
+		return cli.ExitOK
 	case "version", "--version", "-v":
-		fmt.Fprintf(os.Stderr, "dotf %s\n", Version)
-		os.Exit(0)
+		fmt.Fprintf(stdout, "dotf %s\n", Version)
+		return cli.ExitOK
 	default:
-		globalCfg.PrintErr("Unknown command: %s\n\n", cmd)
-		printUsage()
-		os.Exit(1)
+		cfg.PrintErr("Error: unknown command: %s\n\n", cmd)
+		if !cfg.JSON {
+			fmt.Fprint(stderr, usage)
+		}
+		return cli.ExitUsage
 	}
 
 	if err != nil {
-		// Map error types to exit codes
-		exitCode := 1
-		if strings.Contains(err.Error(), "conflict") || strings.Contains(err.Error(), "already exists") {
-			exitCode = 2
-		} else if strings.Contains(err.Error(), "nothing to do") || strings.Contains(err.Error(), "no files") {
-			exitCode = 3
+		if cfg.JSON {
+			cfg.PrintErr("%v", err)
+		} else {
+			cfg.PrintErr("Error: %v\n", err)
 		}
-		// In JSON mode, the error was already reported as structured JSON by the command
-		// Only print the error prefix for non-JSON output
-		if !globalCfg.JSON {
-			globalCfg.PrintErr("Error: %v\n", err)
-		}
-		os.Exit(exitCode)
 	}
+	return cli.ExitCode(err)
 }
 
-func printWelcome() {
-	fmt.Fprintf(os.Stderr, `╔══════════════════════════════════════════╗
-║          DOTF %-22s║
-║  Zero-Configuration Dotfiles Runtime    ║
-╚══════════════════════════════════════════╝
+const commands = `Commands:
+  install    Install dotfiles from a repository
+  explain    Show detected environment and layer decisions
+  status     Show installation status of dotfiles
+  apply      Deploy the layers' files (no hooks, no packages)
+  unapply    Remove the files dotf installed
+  doctor     Run diagnostics and repair issues
+  inspect    Inspect internals (file, layer, state, overrides, backup)
+  restore    Restore files from backups
+  version    Print the version
 
-DOTF automatically detects your Linux environment and installs
-the correct configuration files from a layered repository.
+Global flags (anywhere on the command line):
+  --json       Output in JSON format
+  --quiet      Suppress non-error output
+  --no-color   Disable colored output (also NO_COLOR)
+  --filter     Filter status output: value or key:value
 
-Quick start in 3 steps:
+Run 'dotf <command> --help' for detailed usage.
+`
+
+const usage = "Usage: dotf <command> [options]\n\n" + commands
+
+func printWelcome(w io.Writer) {
+	const width = 44 // inner width of the box
+	line := func(s string) string {
+		pad := width - len([]rune(s))
+		if pad < 0 {
+			pad = 0
+		}
+		left := pad / 2
+		return "║" + strings.Repeat(" ", left) + s + strings.Repeat(" ", pad-left) + "║\n"
+	}
+	border := strings.Repeat("═", width)
+	fmt.Fprint(w, "╔"+border+"╗\n"+
+		line("DOTF "+Version)+
+		line("Zero-Configuration Dotfiles Runtime")+
+		"╚"+border+"╝\n")
+	fmt.Fprint(w, `
+DOTF detects your Linux environment and installs the matching
+configuration files from a layered repository.
+
+Quick start:
 
   1. Clone or create your dotfiles repository:
      git clone https://github.com/you/dotfiles
@@ -99,54 +127,15 @@ Quick start in 3 steps:
   2. See what DOTF detects about your system:
      dotf explain
 
-  3. Install your dotfiles:
+  3. Preview, then install:
+     dotf install --dry-run
      dotf install
 
-Commands:
-  install    Install dotfiles from a repository
-  explain    Show detected environment and layer decisions
-  status     Show installation status of dotfiles
-  apply      Apply a profile
-  unapply    Revert applied changes
-  doctor     Run diagnostics and repair issues
-  inspect    Inspect internals (file, layer, state, overrides)
-  restore    Restore files from backups
-
-Global flags:
-  --json       Output in JSON format (scriptable)
-  --quiet      Suppress non-error output
-  --no-color   Disable colored output
-  --filter     Filter output by expression
-
-Run 'dotf <command> --help' for detailed usage.
-`, Version)
+`+commands)
 }
 
-func printUsage() {
-	fmt.Fprint(os.Stderr, `Usage: dotf <command> [options]
-
-Commands:
-  install    Install dotfiles to your home directory
-  explain    Display detected environment and layer decisions
-  status     Show installation status of dotfiles
-  apply      Apply a profile
-  unapply    Revert applied changes
-  doctor     Run diagnostics and repair
-  inspect    Inspect internals (file, layer, state, overrides, backup)
-  restore    Restore files from backups
-
-Global flags:
-  --json       Output in JSON format
-  --quiet      Suppress non-error output
-  --no-color   Disable colored output
-  --filter     Filter output by expression
-
-Run 'dotf <command> --help' for detailed usage.
-`)
-}
-
-// xdgStateDir returns the DOTF state directory following the XDG Base Directory spec.
-// Uses $XDG_STATE_HOME/dotf if set, otherwise falls back to ~/.local/state/dotf.
+// xdgStateDir returns the DOTF state directory following the XDG Base
+// Directory spec: $XDG_STATE_HOME/dotf, or ~/.local/state/dotf.
 func xdgStateDir() string {
 	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
 		return filepath.Join(xdg, "dotf")

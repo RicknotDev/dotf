@@ -1,75 +1,87 @@
 package cli
 
 import (
-	"flag"
 	"fmt"
-	"os"
 
-	"github.com/codebuff/dotf/internal/detect"
-	"github.com/codebuff/dotf/internal/layer"
+	"github.com/RicknotDev/dotf/internal/layer"
 )
 
-// Explain runs the explain command.
-func Explain(args []string) error {
-	fs := flag.NewFlagSet("explain", flag.ContinueOnError)
-	help := fs.Bool("help", false, "Show help")
+const explainHelp = `Usage: dotf explain [--profile <name>]
 
-	if err := fs.Parse(args); err != nil {
+Display the detected environment, the layers that are active, and which
+layer wins for files present in several layers.
+
+Uses the current directory, or the repository of the last install.
+`
+
+// Explain runs the explain command.
+func Explain(args []string, stateDir string, cfg OutputConfig) error {
+	fs := newFlagSet("explain")
+	profileName := fs.String("profile", "", "")
+	help := fs.Bool("help", false, "")
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-
 	if *help {
-		fmt.Fprint(os.Stderr, `Usage: dotf explain
-
-Display the detected environment, resolved layers, and any file overrides.
-
-This command helps you understand exactly which configuration files
-DOTF will use and which layers take priority.
-`)
+		fmt.Fprint(cfg.out(), explainHelp)
 		return nil
 	}
 
-	// Determine the repository root
-	repoRoot, err := os.Getwd()
+	repoRoot, _, err := findRepo(stateDir)
 	if err != nil {
-		return fmt.Errorf("cannot determine working directory: %w", err)
+		return err
 	}
-
-	// Detect environment
-	p := detect.Detect()
-
-	// Print detected environment
-	fmt.Println(p.String())
-	fmt.Println()
-
-	// Resolve layers
-	result, err := layer.Resolve(repoRoot, p)
+	sel, err := selectLayers(repoRoot, *profileName)
 	if err != nil {
-		return fmt.Errorf("resolving layers: %w", err)
+		return err
 	}
-
-	fmt.Println("Activated Layers:")
-	if len(result.Layers) == 0 {
-		fmt.Println("  (none)")
-	} else {
-		for _, l := range result.Layers {
-			fmt.Printf("  %s\n", l.Path())
-		}
+	for _, w := range sel.Warnings {
+		cfg.Warn("%s", w)
 	}
-	fmt.Println()
-
-	if len(result.Missing) > 0 {
-		fmt.Println("Unavailable Layers (not found in repository):")
-		for _, l := range result.Missing {
-			fmt.Printf("  %s\n", l.Path())
-		}
-		fmt.Println()
-	}
-
-	// Compute and display overrides
+	result := sel.Result
 	overrides := layer.ComputeOverrides(result.Layers)
-	fmt.Println("Overrides:")
-	fmt.Print(layer.FormatOverrideGroups(overrides))
 
+	if cfg.JSON {
+		type override struct {
+			File       string `json:"file"`
+			Winner     string `json:"winner"`
+			Overridden string `json:"overridden"`
+		}
+		ov := []override{}
+		for _, o := range overrides {
+			ov = append(ov, override{o.File, o.Overriding, o.Overridden})
+		}
+		cfg.PrintJSON(map[string]interface{}{
+			"repository": repoRoot,
+			"profile":    sel.ProfileName,
+			"detected":   profileFields(sel),
+			"layers":     getLayerPaths(result.Layers),
+			"missing":    missingPaths(result),
+			"overrides":  ov,
+		})
+		return nil
+	}
+
+	cfg.Print(sel.Profile.String())
+	if sel.ProfileName != "" {
+		cfg.Printf("Profile: %s\n\n", sel.ProfileName)
+	}
+	cfg.Print("Activated Layers:")
+	if len(result.Layers) == 0 {
+		cfg.Print("  (none)")
+	}
+	for _, l := range result.Layers {
+		cfg.Printf("  %s\n", l.Path())
+	}
+	cfg.Print("")
+	if len(result.Missing) > 0 {
+		cfg.Print("Unavailable Layers (not found in repository):")
+		for _, l := range result.Missing {
+			cfg.Printf("  %s\n", l.Path())
+		}
+		cfg.Print("")
+	}
+	cfg.Print("Overrides:")
+	cfg.Printf("%s", layer.FormatOverrideGroups(overrides))
 	return nil
 }

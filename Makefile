@@ -1,28 +1,34 @@
-.PHONY: all build test lint clean vet install uninstall coverage release
+.PHONY: all build test lint fmt fmt-check e2e clean vet install uninstall coverage release
 
 BINARY=dotf
 GO=go
-VERSION=v0.6.0
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 GOFLAGS=-ldflags="-s -w -X main.Version=$(VERSION)"
 PREFIX=/usr/local
 DIST_DIR=dist
 
-all: vet build test
+all: lint build test
 
 build:
 	$(GO) build $(GOFLAGS) -o $(BINARY) ./cmd/dotf
 
+# Tests run with a throwaway HOME so they can never touch your dotfiles.
 test:
-	$(GO) test -v -race -coverprofile=coverage.txt ./...
+	HOME=$$(mktemp -d) $(GO) test -race -coverprofile=coverage.txt ./...
+
+e2e: build
+	./scripts/e2e.sh ./$(BINARY)
 
 vet:
 	$(GO) vet ./...
 
-lint:
-	$(GO) vet ./...
+lint: fmt-check vet
 
 fmt:
-	$(GO) fmt ./...
+	gofmt -w .
+
+fmt-check:
+	@test -z "$$(gofmt -l .)" || { gofmt -l .; echo "run 'make fmt'"; exit 1; }
 
 clean:
 	rm -f $(BINARY)

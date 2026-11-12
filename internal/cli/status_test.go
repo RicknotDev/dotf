@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/codebuff/dotf/internal/state"
+	"github.com/RicknotDev/dotf/internal/state"
 )
 
 func TestStatusHelp(t *testing.T) {

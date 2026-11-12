@@ -86,6 +86,7 @@ func TestApplyDiff(t *testing.T) {
 
 func TestApplyProfileFlag(t *testing.T) {
 	dir := setupTestRepo(t)
+	_ = os.WriteFile(filepath.Join(dir, "dotf.yaml"), []byte("profiles:\n  test:\n    include: [distro/arch]\n"), 0644)
 	oldWd, _ := os.Getwd()
 	_ = os.Chdir(dir)
 	defer func() { _ = os.Chdir(oldWd) }()
@@ -96,6 +97,11 @@ func TestApplyProfileFlag(t *testing.T) {
 	err := Apply([]string{"--dry-run", "--profile", "test"}, stateDir, cfg)
 	if err != nil {
 		t.Fatalf("Apply --profile failed: %v", err)
+	}
+
+	// An unknown profile is an error, not silently ignored.
+	if err := Apply([]string{"--dry-run", "--profile", "nope"}, stateDir, cfg); err == nil {
+		t.Fatal("expected error for unknown profile")
 	}
 }
 

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/codebuff/dotf/internal/detect"
+	"github.com/RicknotDev/dotf/internal/detect"
 )
 
 // setupTestRepo creates a minimal DOTF repository structure for testing.
@@ -49,7 +49,7 @@ func setupTestRepo(t *testing.T) string {
 
 func TestExplainHelp(t *testing.T) {
 	// --help should print usage and return nil
-	err := Explain([]string{"--help"})
+	err := Explain([]string{"--help"}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Explain --help returned error: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestExplainInRepo(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err = Explain([]string{})
+	err = Explain([]string{}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Explain() failed: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestExplainShowsOverrides(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err = Explain([]string{})
+	err = Explain([]string{}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Explain() failed: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestExplainWithoutLayers(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := Explain([]string{})
+	err := Explain([]string{}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Explain() in dir without layers failed: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestExplainWithoutLayers(t *testing.T) {
 
 func TestExplainParsesFlagsCorrectly(t *testing.T) {
 	// Unknown flags should produce an error
-	err := Explain([]string{"--unknown-flag"})
+	err := Explain([]string{"--unknown-flag"}, t.TempDir(), OutputConfig{})
 	if err == nil {
 		t.Fatal("expected error for unknown flag")
 	}
@@ -191,7 +191,7 @@ func TestExplainNoArgsIsOK(t *testing.T) {
 	_ = os.Chdir(dir)
 	defer func() { _ = os.Chdir(oldWd) }()
 
-	err := Explain([]string{})
+	err := Explain([]string{}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Explain() with no args failed: %v", err)
 	}

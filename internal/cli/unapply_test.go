@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/codebuff/dotf/internal/state"
+	"github.com/RicknotDev/dotf/internal/state"
 )
 
 func TestUnapplyHelp(t *testing.T) {

@@ -1,298 +1,322 @@
 package cli
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/codebuff/dotf/internal/detect"
-	"github.com/codebuff/dotf/internal/layer"
-	"github.com/codebuff/dotf/internal/state"
+	"github.com/RicknotDev/dotf/internal/backup"
+	"github.com/RicknotDev/dotf/internal/deploy"
+	"github.com/RicknotDev/dotf/internal/layer"
+	"github.com/RicknotDev/dotf/internal/profile"
+	"github.com/RicknotDev/dotf/internal/state"
 )
 
-// Inspect runs the inspect command.
-func Inspect(args []string, stateDir string) error {
-	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
-	help := fs.Bool("help", false, "Show help")
+const inspectHelp = `Usage: dotf inspect <subcommand> [options]
 
-	if err := fs.Parse(args); err != nil {
+Inspect DOTF internals. Uses the current directory, or the repository of
+the last install.
+
+Subcommands:
+  file <path>          Show which layers provide a file and what is installed
+  layer <name>         Show all files in a layer (e.g. distro/arch)
+  state                Show the recorded state
+  overrides            Show every resolved file and the layer that wins
+  backup               Show the backups
+
+Options:
+  --profile <name>     Use a profile from dotf.yaml
+  --json               Output in JSON format (global flag)
+`
+
+// Inspect runs the inspect command.
+func Inspect(args []string, stateDir string, cfg OutputConfig) error {
+	fs := newFlagSet("inspect")
+	profileName := fs.String("profile", "", "")
+	help := fs.Bool("help", false, "")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if *help {
+		fmt.Fprint(cfg.out(), inspectHelp)
+		return nil
+	}
+	remaining := fs.Args()
+	if len(remaining) < 1 {
+		return usageErr("inspect requires a subcommand: file, layer, state, overrides, or backup")
+	}
+	subcmd, subargs := remaining[0], remaining[1:]
+
+	switch subcmd {
+	case "state":
+		return inspectState(cfg, stateDir)
+	case "backup":
+		return inspectBackup(cfg, stateDir)
+	case "file", "layer", "overrides":
+	default:
+		return usageErr("unknown inspect subcommand: %s (use: file, layer, state, overrides, backup)", subcmd)
+	}
+
+	repoRoot, err := requireRepo(stateDir)
+	if err != nil {
+		return err
+	}
+	switch subcmd {
+	case "file":
+		return inspectFile(cfg, repoRoot, stateDir, *profileName, subargs)
+	case "layer":
+		return inspectLayer(cfg, repoRoot, subargs)
+	default:
+		return inspectOverrides(cfg, repoRoot, *profileName)
+	}
+}
+
+func inspectFile(cfg OutputConfig, repoRoot, stateDir, profileName string, args []string) error {
+	if len(args) < 1 {
+		return usageErr("file path required")
+	}
+	rel := filepath.ToSlash(filepath.Clean(args[0]))
+	sel, err := selectLayers(repoRoot, profileName)
+	if err != nil {
+		return err
+	}
+	files, err := deploy.Collect(sel.Result.Layers, true)
+	if err != nil {
 		return err
 	}
 
-	if *help {
-		fmt.Fprint(os.Stderr, `Usage: dotf inspect <subcommand> [options]
-
-Inspect DOTF internals.
-
-Subcommands:
-  file <path>          Show which layer provides a specific file
-  layer <name>         Show all files in a specific layer
-  state                Show full state information
-  overrides            Show all file overrides with details
-  backup               Show backup manifest
-
-Examples:
-  dotf inspect file .config/kitty/kitty.conf
-  dotf inspect layer distro/arch
-  dotf inspect state
-`)
-		return nil
+	type provider struct {
+		Layer string `json:"layer"`
+		Path  string `json:"path"`
 	}
-
-	repoRoot, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("cannot determine working directory: %w", err)
-	}
-	remaining := fs.Args()
-
-	if len(remaining) < 1 {
-		return fmt.Errorf("inspect requires a subcommand: file, layer, state, overrides, or backup")
-	}
-
-	subcmd := remaining[0]
-	subargs := remaining[1:]
-
-	switch subcmd {
-	case "file":
-		return inspectFile(repoRoot, subargs)
-	case "layer":
-		return inspectLayer(repoRoot, subargs)
-	case "state":
-		return inspectState(stateDir)
-	case "overrides":
-		return inspectOverrides(repoRoot)
-	case "backup":
-		return inspectBackup(stateDir)
-	default:
-		return fmt.Errorf("unknown inspect subcommand: %s (use: file, layer, state, overrides, backup)", subcmd)
-	}
-}
-
-func inspectFile(repoRoot string, args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("file path required")
-	}
-	filePath := args[0]
-
-	p := detect.Detect()
-	result, err := layer.Resolve(repoRoot, p)
-	if err != nil {
-		return fmt.Errorf("resolving layers: %w", err)
-	}
-
-	fmt.Printf("Inspecting file: %s\n", filePath)
-	fmt.Println()
-
-	found := false
-	for _, l := range result.Layers {
-		fullPath := filepath.Join(l.DirPath, filePath)
-		if _, err := os.Stat(fullPath); err == nil {
-			fmt.Printf("  Layer:  %s\n", l.Path())
-			fmt.Printf("  Path:   %s\n", fullPath)
-			found = true
+	var providers []provider
+	for _, l := range sel.Result.Layers {
+		p := filepath.Join(l.DirPath, rel)
+		if _, err := os.Lstat(p); err == nil && !layer.Reserved(rel, false) {
+			providers = append(providers, provider{l.Path(), p})
 		}
 	}
-
-	if !found {
-		fmt.Println("  (not found in any layer)")
+	winner := ""
+	if e, ok := files[rel]; ok {
+		winner = e.Layer
 	}
 
-	// Check if installed
-	homeDir, err := os.UserHomeDir()
+	home, err := homeDir()
 	if err != nil {
-		fmt.Println("  (cannot determine home directory)")
-		return nil
+		return err
 	}
-	targetPath := filepath.Join(homeDir, filePath)
-	if info, err := os.Lstat(targetPath); err == nil {
-		fmt.Println()
-		fmt.Println("Installed status:")
+	installed := map[string]string{"status": "not installed"}
+	if info, err := os.Lstat(filepath.Join(home, rel)); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
-			target, _ := os.Readlink(targetPath)
-			fmt.Printf("  Type:   symlink\n")
-			fmt.Printf("  Target: %s\n", target)
+			target, _ := os.Readlink(filepath.Join(home, rel))
+			installed = map[string]string{"status": "installed", "type": "symlink", "target": target}
 		} else {
-			fmt.Printf("  Type:   regular file\n")
+			installed = map[string]string{"status": "installed", "type": "regular file"}
 		}
-	} else {
-		fmt.Println()
-		fmt.Println("(not installed)")
+	}
+	if sm, err := state.NewManager(stateDir); err == nil {
+		if ref, ok := sm.File(rel); ok {
+			installed["managed_by_dotf"] = "yes (" + ref.Type + " from " + ref.Layer + ")"
+		}
 	}
 
-	return nil
-}
-
-func inspectLayer(repoRoot string, args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("layer name required (e.g., distro/arch)")
-	}
-	layerName := args[0]
-
-	layerDir := filepath.Join(repoRoot, "layers", layerName)
-	info, err := os.Stat(layerDir)
-	if err != nil {
-		return fmt.Errorf("layer not found: %s (%s)", layerName, layerDir)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("not a directory: %s", layerDir)
-	}
-
-	fmt.Printf("Layer: %s\n", layerName)
-	fmt.Printf("Path:  %s\n", layerDir)
-	fmt.Println()
-	fmt.Println("Files:")
-
-	count := 0
-	walkErr := filepath.WalkDir(layerDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		rel, relErr := filepath.Rel(layerDir, path)
-		if relErr != nil {
-			return relErr
-		}
-		fmt.Printf("  %s\n", rel)
-		count++
+	if cfg.JSON {
+		cfg.PrintJSON(map[string]interface{}{"file": rel, "providers": providers, "winner": winner, "installed": installed})
 		return nil
-	})
-	if walkErr != nil {
-		return walkErr
 	}
-
-	fmt.Println()
-	fmt.Printf("Total: %d files\n", count)
+	cfg.Printf("Inspecting file: %s\n\n", rel)
+	if len(providers) == 0 {
+		cfg.Print("  (not found in any active layer)")
+	}
+	for _, p := range providers {
+		mark := ""
+		if p.Layer == winner {
+			mark = "  <- wins"
+		}
+		cfg.Printf("  Layer:  %s%s\n  Path:   %s\n", p.Layer, mark, p.Path)
+	}
+	cfg.Print("")
+	cfg.Print("Installed status:")
+	keys := make([]string, 0, len(installed))
+	for k := range installed {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		cfg.Printf("  %s: %s\n", k, installed[k])
+	}
 	return nil
 }
 
-func inspectState(stateDir string) error {
+func inspectLayer(cfg OutputConfig, repoRoot string, args []string) error {
+	if len(args) < 1 {
+		return usageErr("layer name required (e.g., distro/arch)")
+	}
+	lt, name, err := profile.ParseLayerPath(args[0])
+	if err != nil {
+		return err
+	}
+	rl := layer.ResolvedLayer{Type: lt, Name: name, DirPath: filepath.Join(repoRoot, "layers", "base")}
+	if lt != profile.LayerBase {
+		rl.DirPath = filepath.Join(repoRoot, "layers", string(lt), name)
+	}
+	info, err := os.Stat(rl.DirPath)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("layer not found: %s (%s)", args[0], rl.DirPath)
+	}
+	files, err := deploy.Collect([]layer.ResolvedLayer{rl}, true)
+	if err != nil {
+		return err
+	}
+	list := make([]string, 0, len(files))
+	for rel, e := range files {
+		if e.Kind == deploy.KindSecret {
+			rel += " (secret)"
+		}
+		list = append(list, rel)
+	}
+	sort.Strings(list)
+
+	if cfg.JSON {
+		cfg.PrintJSON(map[string]interface{}{"layer": rl.Path(), "path": rl.DirPath, "files": list})
+		return nil
+	}
+	cfg.Printf("Layer: %s\nPath:  %s\n\nFiles:\n", rl.Path(), rl.DirPath)
+	for _, f := range list {
+		cfg.Printf("  %s\n", f)
+	}
+	cfg.Printf("\nTotal: %s\n", plural(len(list), "file"))
+	return nil
+}
+
+func inspectState(cfg OutputConfig, stateDir string) error {
 	sm, err := state.NewManager(stateDir)
 	if err != nil {
 		return fmt.Errorf("cannot open state: %w", err)
 	}
-
 	s := sm.GetState()
+	if cfg.JSON {
+		cfg.PrintJSON(s)
+		return nil
+	}
+	cfg.Print("DOTF State")
+	cfg.Print("==========")
+	cfg.Printf("  Version:        %d\n", s.Version)
+	cfg.Printf("  Repository:     %s\n", nonEmpty(s.Repository, "-"))
+	cfg.Printf("  Last install:   %s\n\n", nonEmpty(s.LastInstall, "never"))
 
-	fmt.Println("DOTF State")
-	fmt.Println("==========")
-	fmt.Printf("  Version:        %d\n", s.Version)
-	fmt.Printf("  Repository:     %s\n", s.Repository)
-	fmt.Printf("  Last install:   %s\n", nonEmpty(s.LastInstall, "never"))
-	fmt.Println()
-
-	fmt.Printf("Installed layers (%d):\n", len(s.InstalledLayers))
+	cfg.Printf("Installed layers (%d):\n", len(s.InstalledLayers))
 	for _, l := range s.InstalledLayers {
-		fmt.Printf("  %s\n", l)
+		cfg.Printf("  %s\n", l)
 	}
-	fmt.Println()
-
-	fmt.Printf("Installed files (%d):\n", len(s.InstalledFiles))
-	for path, ref := range s.InstalledFiles {
-		fmt.Printf("  %s [%s] from %s\n", path, ref.Type, ref.Layer)
+	cfg.Printf("\nInstalled files (%d):\n", len(s.InstalledFiles))
+	for _, rel := range sm.Files() {
+		ref := s.InstalledFiles[rel]
+		cfg.Printf("  %s [%s] from %s\n", rel, ref.Type, ref.Layer)
 	}
-	fmt.Println()
-
-	fmt.Printf("Backups (%d):\n", len(s.BackupManifest))
-	for path, b := range s.BackupManifest {
-		fmt.Printf("  %s -> %s (%s)\n", path, b.Original, b.Created)
+	paths := make([]string, 0, len(s.BackupManifest))
+	for p := range s.BackupManifest {
+		paths = append(paths, p)
 	}
-
+	sort.Strings(paths)
+	cfg.Printf("\nBackups (%d):\n", len(paths))
+	for _, p := range paths {
+		b := s.BackupManifest[p]
+		cfg.Printf("  %s -> %s (%s)\n", p, b.Original, b.Created)
+	}
 	return nil
 }
 
-func inspectOverrides(repoRoot string) error {
-	p := detect.Detect()
-	result, err := layer.Resolve(repoRoot, p)
+// inspectOverrides lists every resolved file. Layers are walked from lowest
+// to highest priority, so the last provider is the one that is installed.
+func inspectOverrides(cfg OutputConfig, repoRoot, profileName string) error {
+	sel, err := selectLayers(repoRoot, profileName)
 	if err != nil {
-		return fmt.Errorf("resolving layers: %w", err)
+		return err
 	}
-
-	overrides := layer.ComputeOverrides(result.Layers)
-
-	fmt.Println("File Overrides")
-	fmt.Println("==============")
-	fmt.Println()
-	fmt.Print(layer.FormatOverrideGroups(overrides))
-
-	// Also show non-overridden files for completeness
-	fmt.Println()
-	fmt.Println("All resolved files:")
-	allFiles := make(map[string][]string)
-	for _, l := range result.Layers {
-		//nolint:errcheck // best-effort file listing for display
-		filepath.WalkDir(l.DirPath, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				return nil
-			}
-			rel, relErr := filepath.Rel(l.DirPath, path)
-			if relErr != nil {
-				return nil
-			}
-			allFiles[rel] = append(allFiles[rel], l.Path())
-			return nil
-		})
-	}
-
-	// Sort and display
-	fileList := make([]string, 0, len(allFiles))
-	for f := range allFiles {
-		fileList = append(fileList, f)
-	}
-	sort.Strings(fileList)
-
-	for _, f := range fileList {
-		sources := allFiles[f]
-		if len(sources) == 1 {
-			fmt.Printf("  %s <- %s\n", f, sources[0])
-		} else {
-			fmt.Printf("  %s <- %s (overrides: %s)\n", f, sources[0], strings.Join(sources[1:], ", "))
-		}
-	}
-
-	return nil
-}
-
-func inspectBackup(stateDir string) error {
-	backupDir := filepath.Join(stateDir, "backups")
-	entries, err := os.ReadDir(backupDir)
+	files, err := deploy.Collect(sel.Result.Layers, true)
 	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Println("No backups found.")
-			return nil
-		}
-		return fmt.Errorf("cannot read backup directory: %w", err)
+		return err
 	}
+	rels := make([]string, 0, len(files))
+	for r := range files {
+		rels = append(rels, r)
+	}
+	sort.Strings(rels)
 
-	fmt.Println("Backup Manifest")
-	fmt.Println("===============")
-	fmt.Println()
-
-	if len(entries) == 0 {
-		fmt.Println("  (none)")
+	if cfg.JSON {
+		type entry struct {
+			File       string   `json:"file"`
+			Winner     string   `json:"winner"`
+			Overridden []string `json:"overridden,omitempty"`
+			Secret     bool     `json:"secret,omitempty"`
+		}
+		out := []entry{}
+		for _, r := range rels {
+			e := files[r]
+			out = append(out, entry{r, e.Layer, e.Overridden, e.Kind == deploy.KindSecret})
+		}
+		cfg.PrintJSON(out)
 		return nil
 	}
 
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".bak") {
-			continue
+	cfg.Print("File Overrides")
+	cfg.Print("==============")
+	cfg.Print("")
+	cfg.Printf("%s", layer.FormatOverrideGroups(layer.ComputeOverrides(sel.Result.Layers)))
+	cfg.Print("")
+	cfg.Print("All resolved files:")
+	for _, r := range rels {
+		e := files[r]
+		line := fmt.Sprintf("  %s <- %s", r, e.Layer)
+		if len(e.Overridden) > 0 {
+			line += " (overrides: " + strings.Join(e.Overridden, ", ") + ")"
 		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
+		if e.Kind == deploy.KindSecret {
+			line += " (secret)"
 		}
-		fmt.Printf("  %s (%d bytes, %s)\n",
-			entry.Name(),
-			info.Size(),
-			info.ModTime().Format("2006-01-02 15:04:05"))
+		cfg.Print(line)
 	}
+	return nil
+}
 
+func inspectBackup(cfg OutputConfig, stateDir string) error {
+	bm, err := backup.NewManager(filepath.Join(stateDir, "backups"))
+	if err != nil {
+		return err
+	}
+	groups, err := bm.ListAll()
+	if err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	if cfg.JSON {
+		cfg.PrintJSON(groups)
+		return nil
+	}
+	cfg.Print("Backup Manifest")
+	cfg.Print("===============")
+	cfg.Print("")
+	if len(keys) == 0 {
+		cfg.Print("  (no backups found)")
+		return nil
+	}
+	for _, k := range keys {
+		cfg.Printf("  %s:\n", k)
+		for _, b := range groups[k] {
+			size := int64(0)
+			if info, err := os.Lstat(b.BackupPath); err == nil {
+				size = info.Size()
+			}
+			cfg.Printf("    %s  %d bytes  %s\n", b.Time.Format("2006-01-02 15:04:05"), size, filepath.Base(b.BackupPath))
+		}
+	}
 	return nil
 }

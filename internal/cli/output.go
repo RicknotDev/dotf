@@ -2,90 +2,142 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"sort"
 	"strings"
 )
 
 // OutputConfig controls CLI output behavior.
+//
+// stdout carries results (or JSON with --json). stderr carries progress
+// (Info, hidden by --quiet and --json) and errors (always shown; as JSON
+// objects with --json).
 type OutputConfig struct {
 	JSON    bool
 	Quiet   bool
 	NoColor bool
-	Filter  string // filter string for status, e.g., "profile:base" or "state:ok"
+	Filter  string // "value" or "key:value", e.g. "broken" or "layer:base"
+
+	Stdout io.Writer // defaults to os.Stdout
+	Stderr io.Writer // defaults to os.Stderr
 }
 
-// ParseGlobalFlags parses global flags from args and returns remaining args.
+// ParseGlobalFlags extracts the global flags from anywhere in args and
+// returns the remaining arguments in order. Accepts --filter value and
+// --filter=value.
 func ParseGlobalFlags(args []string) (OutputConfig, []string) {
 	cfg := OutputConfig{}
 	remaining := make([]string, 0, len(args))
-
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--json":
+		a := args[i]
+		switch {
+		case a == "--":
+			remaining = append(remaining, args[i:]...)
+			i = len(args)
+		case a == "--json":
 			cfg.JSON = true
-		case "--quiet":
+		case a == "--quiet" || a == "-q":
 			cfg.Quiet = true
-		case "--no-color":
+		case a == "--no-color":
 			cfg.NoColor = true
-		case "--filter":
+		case a == "--filter":
 			if i+1 < len(args) {
 				i++
 				cfg.Filter = args[i]
 			}
+		case strings.HasPrefix(a, "--filter="):
+			cfg.Filter = strings.TrimPrefix(a, "--filter=")
 		default:
-			remaining = append(remaining, args[i])
+			remaining = append(remaining, a)
 		}
 	}
-
-	// Respect NO_COLOR environment variable
 	if os.Getenv("NO_COLOR") != "" {
 		cfg.NoColor = true
 	}
-
 	return cfg, remaining
 }
 
-// Print prints a message to stdout respecting the output config.
+// IsTerminal reports whether f is a character device (a terminal).
+func IsTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func (c OutputConfig) out() io.Writer {
+	if c.Stdout != nil {
+		return c.Stdout
+	}
+	return os.Stdout
+}
+
+func (c OutputConfig) errw() io.Writer {
+	if c.Stderr != nil {
+		return c.Stderr
+	}
+	return os.Stderr
+}
+
+// Print prints a line of human-readable output to stdout (suppressed by
+// --quiet and --json).
 func (c OutputConfig) Print(msg string) {
-	if c.Quiet {
+	if c.Quiet || c.JSON {
 		return
 	}
-	if c.JSON {
-		// In JSON mode, stdout is reserved for JSON output
-		return
-	}
-	fmt.Println(msg)
+	fmt.Fprintln(c.out(), msg)
 }
 
-// Printf formats and prints to stdout respecting the output config.
+// Printf formats human-readable output to stdout (suppressed by --quiet
+// and --json).
 func (c OutputConfig) Printf(format string, args ...interface{}) {
-	if c.Quiet {
+	if c.Quiet || c.JSON {
 		return
 	}
-	if c.JSON {
-		return
-	}
-	fmt.Printf(format, args...)
+	fmt.Fprintf(c.out(), format, args...)
 }
 
-// PrintErr prints an error message to stderr respecting quiet mode.
-func (c OutputConfig) PrintErr(format string, args ...interface{}) {
-	if c.Quiet && !c.JSON {
+// Info prints progress to stderr (suppressed by --quiet and --json).
+func (c OutputConfig) Info(format string, args ...interface{}) {
+	if c.Quiet || c.JSON {
 		return
 	}
+	fmt.Fprintf(c.errw(), format, args...)
+}
+
+// InfoWriter returns the progress writer (io.Discard under --quiet/--json).
+func (c OutputConfig) InfoWriter() io.Writer {
+	if c.Quiet || c.JSON {
+		return io.Discard
+	}
+	return c.errw()
+}
+
+// Warn prints a warning to stderr. Warnings are shown even with --quiet.
+func (c OutputConfig) Warn(format string, args ...interface{}) {
+	msg := strings.TrimRight(fmt.Sprintf(format, args...), "\n")
+	if c.JSON {
+		b, _ := json.Marshal(map[string]string{"level": "warning", "message": msg})
+		fmt.Fprintln(c.errw(), string(b))
+		return
+	}
+	fmt.Fprintln(c.errw(), "warning: "+msg)
+}
+
+// PrintErr prints an error message to stderr. Errors are never hidden by
+// --quiet; with --json they are printed as {"level":"error","error":...}.
+func (c OutputConfig) PrintErr(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	if c.JSON {
-		// In JSON mode, errors are output as JSON on stderr
-		errOutput := map[string]interface{}{
-			"error": msg,
+		b, _ := json.Marshal(map[string]interface{}{
+			"error": strings.TrimRight(msg, "\n"),
 			"level": "error",
-		}
-		b, _ := json.Marshal(errOutput)
-		fmt.Fprintln(os.Stderr, string(b))
+		})
+		fmt.Fprintln(c.errw(), string(b))
 		return
 	}
-	fmt.Fprint(os.Stderr, msg)
+	fmt.Fprint(c.errw(), msg)
 }
 
 // PrintErrln prints an error line to stderr.
@@ -93,14 +145,14 @@ func (c OutputConfig) PrintErrln(msg string) {
 	c.PrintErr("%s\n", msg)
 }
 
-// PrintJSON prints a JSON representation to stdout.
+// PrintJSON prints v as indented JSON to stdout.
 func (c OutputConfig) PrintJSON(v interface{}) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		c.PrintErr("json error: %v\n", err)
 		return
 	}
-	fmt.Println(string(b))
+	fmt.Fprintln(c.out(), string(b))
 }
 
 // Colorize wraps text in color codes if color is enabled.
@@ -112,44 +164,101 @@ func (c OutputConfig) Colorize(colorCode, text string) string {
 }
 
 // Red returns red text if color is enabled.
-func (c OutputConfig) Red(text string) string {
-	return c.Colorize("31", text)
-}
+func (c OutputConfig) Red(text string) string { return c.Colorize("31", text) }
 
 // Green returns green text if color is enabled.
-func (c OutputConfig) Green(text string) string {
-	return c.Colorize("32", text)
-}
+func (c OutputConfig) Green(text string) string { return c.Colorize("32", text) }
 
 // Yellow returns yellow text if color is enabled.
-func (c OutputConfig) Yellow(text string) string {
-	return c.Colorize("33", text)
-}
+func (c OutputConfig) Yellow(text string) string { return c.Colorize("33", text) }
 
 // Bold returns bold text if color is enabled.
-func (c OutputConfig) Bold(text string) string {
-	return c.Colorize("1", text)
-}
+func (c OutputConfig) Bold(text string) string { return c.Colorize("1", text) }
 
 // Dim returns dim text if color is enabled.
-func (c OutputConfig) Dim(text string) string {
-	return c.Colorize("2", text)
-}
+func (c OutputConfig) Dim(text string) string { return c.Colorize("2", text) }
 
-// matchesFilter checks if a string matches the configured filter.
-// Supports "key:value" format and simple substring match.
+// matchesFilter matches a single string against the filter value
+// (case-insensitive substring; for "key:value" only the value is used).
 func (c OutputConfig) matchesFilter(s string) bool {
 	if c.Filter == "" {
 		return true
 	}
-
-	parts := strings.SplitN(c.Filter, ":", 2)
-	if len(parts) == 2 {
-		// Structured filter: "field:value"
-		return strings.Contains(strings.ToLower(s), strings.ToLower(parts[1]))
+	value := c.Filter
+	if parts := strings.SplitN(c.Filter, ":", 2); len(parts) == 2 {
+		value = parts[1]
 	}
-	// Simple substring filter
-	return strings.Contains(strings.ToLower(s), strings.ToLower(c.Filter))
+	return strings.Contains(strings.ToLower(s), strings.ToLower(value))
+}
+
+// matchFields matches named fields against the filter. "key:value" only
+// looks at that field (error for an unknown key); a bare value matches any
+// field.
+func (c OutputConfig) matchFields(fields map[string]string) (bool, error) {
+	if c.Filter == "" {
+		return true, nil
+	}
+	if parts := strings.SplitN(c.Filter, ":", 2); len(parts) == 2 {
+		key := strings.ToLower(parts[0])
+		v, ok := fields[key]
+		if !ok {
+			keys := make([]string, 0, len(fields))
+			for k := range fields {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			return false, &ExitError{Code: ExitUsage, Err: fmt.Errorf("unknown filter key %q (use one of: %s)", key, strings.Join(keys, ", "))}
+		}
+		return strings.Contains(strings.ToLower(v), strings.ToLower(parts[1])), nil
+	}
+	for _, v := range fields {
+		if strings.Contains(strings.ToLower(v), strings.ToLower(c.Filter)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// Exit codes.
+const (
+	ExitOK          = 0
+	ExitFailure     = 1
+	ExitConflict    = 2 // unresolved conflict (apply --no-interactive)
+	ExitNothingToDo = 3
+	ExitUsage       = 64
+)
+
+// ExitError carries the process exit code for an error.
+type ExitError struct {
+	Code int
+	Err  error
+}
+
+func (e *ExitError) Error() string { return e.Err.Error() }
+func (e *ExitError) Unwrap() error { return e.Err }
+
+// ExitCode returns the exit code for err (0 for nil, 1 by default).
+func ExitCode(err error) int {
+	if err == nil {
+		return ExitOK
+	}
+	var ee *ExitError
+	if errors.As(err, &ee) {
+		return ee.Code
+	}
+	return ExitFailure
+}
+
+func conflictErr(format string, args ...interface{}) error {
+	return &ExitError{Code: ExitConflict, Err: fmt.Errorf(format, args...)}
+}
+
+func nothingToDo(format string, args ...interface{}) error {
+	return &ExitError{Code: ExitNothingToDo, Err: fmt.Errorf(format, args...)}
+}
+
+func usageErr(format string, args ...interface{}) error {
+	return &ExitError{Code: ExitUsage, Err: fmt.Errorf(format, args...)}
 }
 
 // FilterStatus represents the status of an installed file or operation.

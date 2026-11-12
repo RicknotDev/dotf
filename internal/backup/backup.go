@@ -1,27 +1,46 @@
-// Package backup manages versioned, checksummed backups of original files
-// that are replaced by DOTF during installation.
+// Package backup keeps versioned, checksummed copies of files that DOTF
+// replaces in $HOME.
+//
+// A backup of <rel> taken at Unix time <ns> (nanoseconds) is stored as
+//
+//	<backupDir>/<url.PathEscape(rel)>@<ns>.bak      the content (same mode as the original)
+//	<backupDir>/<url.PathEscape(rel)>@<ns>.bak.sha256  "sha256:<hex>" recorded at creation
+//
+// Symlinks are backed up as symlinks with the same target. Files written by
+// dotf <= 0.6 ("path__to__file.<ns>.bak") are still listed and restorable.
 package backup
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// MaxBackupVersions is the default number of backup versions to keep.
+// MaxBackupVersions is the default number of versions kept per file.
+// Override with DOTF_BACKUP_KEEP.
 const MaxBackupVersions = 5
 
-// Backup describes a single backup file.
+const (
+	suffix         = ".bak"
+	checksumSuffix = ".bak.sha256"
+)
+
+// Backup describes a single backup.
 type Backup struct {
-	OriginalPath string // original file path (relative to home)
-	BackupPath   string // absolute path to backup file
-	Checksum     string // SHA-256 checksum
-	Created      string // ISO 8601 timestamp
+	OriginalPath string    // path relative to $HOME
+	BackupPath   string    // absolute path of the backup
+	Checksum     string    // checksum recorded when the backup was made ("" for legacy backups)
+	Created      string    // creation time in Unix nanoseconds, as a string
+	Time         time.Time // creation time
+	Symlink      bool      // the original was a symlink
 }
 
 // Manager handles backup creation, restoration, and pruning.
@@ -30,170 +49,222 @@ type Manager struct {
 	maxKeep   int
 }
 
-// NewManager creates a new backup manager.
+// NewManager returns a manager for backupDir. The directory is created
+// (mode 0700) on the first backup, not here, so read-only commands and
+// dry runs never write to disk.
 func NewManager(backupDir string) (*Manager, error) {
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		return nil, fmt.Errorf("cannot create backup directory: %w", err)
+	keep := MaxBackupVersions
+	if v := os.Getenv("DOTF_BACKUP_KEEP"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("invalid DOTF_BACKUP_KEEP=%q (want a number >= 1)", v)
+		}
+		keep = n
 	}
-	return &Manager{
-		backupDir: backupDir,
-		maxKeep:   MaxBackupVersions,
-	}, nil
+	return &Manager{backupDir: backupDir, maxKeep: keep}, nil
 }
 
-// backupName generates a unique, timestamped backup filename.
-// Uses UnixNano to guarantee uniqueness even within the same second.
-func backupName(relativePath string) string {
-	timestamp := time.Now().UnixNano()
-	safeName := strings.ReplaceAll(relativePath, "/", "__")
-	return fmt.Sprintf("%s.%d.bak", safeName, timestamp)
+// Dir returns the backup directory.
+func (m *Manager) Dir() string { return m.backupDir }
+
+// backupName returns the file name for a backup of relativePath taken at ns.
+func backupName(relativePath string, ns int64) string {
+	return fmt.Sprintf("%s@%d%s", url.PathEscape(filepath.ToSlash(relativePath)), ns, suffix)
 }
 
-// Create creates a backup of a file before it's modified.
-// The backup is written to the backup directory with a timestamp.
+// parseName returns the original path and timestamp encoded in a backup
+// file name, accepting both the current and the legacy format.
+func parseName(name string) (original string, ns int64, ok bool) {
+	if !strings.HasSuffix(name, suffix) {
+		return "", 0, false
+	}
+	base := strings.TrimSuffix(name, suffix)
+	if at := strings.LastIndex(base, "@"); at > 0 {
+		if n, err := strconv.ParseInt(base[at+1:], 10, 64); err == nil {
+			if orig, err := url.PathUnescape(base[:at]); err == nil {
+				return orig, n, true
+			}
+		}
+	}
+	// Legacy: "path__to__file.<ns>.bak"
+	dot := strings.LastIndex(base, ".")
+	if dot <= 0 {
+		return "", 0, false
+	}
+	n, err := strconv.ParseInt(base[dot+1:], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return strings.ReplaceAll(base[:dot], "__", "/"), n, true
+}
+
+// Create backs up fullPath (a regular file or symlink). It returns nil and
+// no error when fullPath does not exist. Any error means no backup was made
+// and the caller must not modify fullPath.
 func (m *Manager) Create(relativePath, fullPath string) (*Backup, error) {
-	// Use Lstat first to detect symlinks (os.Stat follows them)
-	lstatInfo, err := os.Lstat(fullPath)
+	info, err := os.Lstat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil // nothing to back up
+			return nil, nil
 		}
 		return nil, fmt.Errorf("cannot stat %s: %w", fullPath, err)
 	}
-
-	// Don't back up our own symlinks
-	if lstatInfo.Mode()&os.ModeSymlink != 0 {
-		return nil, nil
+	if err := os.MkdirAll(m.backupDir, 0o700); err != nil {
+		return nil, fmt.Errorf("cannot create backup directory: %w", err)
 	}
 
-	backupFile := filepath.Join(m.backupDir, backupName(relativePath))
-
-	// Read and checksum original
-	data, err := os.ReadFile(fullPath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot read %s: %w", fullPath, err)
+	now := time.Now()
+	ns := now.UnixNano()
+	var backupFile string
+	for {
+		backupFile = filepath.Join(m.backupDir, backupName(relativePath, ns))
+		if _, err := os.Lstat(backupFile); os.IsNotExist(err) {
+			break
+		}
+		ns++
 	}
 
-	hash := sha256.Sum256(data)
-	checksum := "sha256:" + hex.EncodeToString(hash[:])
+	var checksum string
+	isLink := info.Mode()&os.ModeSymlink != 0
+	switch {
+	case isLink:
+		target, err := os.Readlink(fullPath)
+		if err != nil {
+			return nil, fmt.Errorf("cannot read symlink %s: %w", fullPath, err)
+		}
+		if err := os.Symlink(target, backupFile); err != nil {
+			return nil, fmt.Errorf("cannot write backup %s: %w", backupFile, err)
+		}
+		checksum = linkChecksum(target)
+	case info.Mode().IsRegular():
+		checksum, err = copyWithChecksum(fullPath, backupFile, info.Mode().Perm())
+		if err != nil {
+			os.Remove(backupFile)
+			return nil, fmt.Errorf("cannot write backup %s: %w", backupFile, err)
+		}
+	default:
+		return nil, fmt.Errorf("cannot back up %s: not a regular file or symlink", fullPath)
+	}
 
-	// Write backup
-	if err := os.WriteFile(backupFile, data, 0644); err != nil {
-		return nil, fmt.Errorf("cannot write backup %s: %w", backupFile, err)
+	if err := os.WriteFile(backupFile+".sha256", []byte(checksum+"\n"), 0o600); err != nil {
+		os.Remove(backupFile)
+		return nil, fmt.Errorf("cannot write backup checksum: %w", err)
 	}
 
 	b := &Backup{
 		OriginalPath: relativePath,
 		BackupPath:   backupFile,
 		Checksum:     checksum,
-		Created:      time.Now().Format(time.RFC3339),
+		Created:      strconv.FormatInt(ns, 10),
+		Time:         time.Unix(0, ns),
+		Symlink:      isLink,
 	}
-
-	// Prune old backups
 	m.prune(relativePath)
-
 	return b, nil
 }
 
-// List returns all backups for a given original path, sorted by date (newest first).
+// List returns the backups of exactly relativePath, newest first.
 func (m *Manager) List(relativePath string) ([]Backup, error) {
-	entries, err := os.ReadDir(m.backupDir)
+	all, err := m.ListAll()
 	if err != nil {
-		return nil, fmt.Errorf("cannot read backup directory: %w", err)
+		return nil, err
 	}
-
-	prefix := strings.ReplaceAll(relativePath, "/", "__") + "."
-	var backups []Backup
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) || !strings.HasSuffix(entry.Name(), ".bak") {
-			continue
-		}
-
-		fullPath := filepath.Join(m.backupDir, entry.Name())
-		checksum := computeChecksum(fullPath)
-
-		// Extract timestamp: filename format is "safePath.TIMESTAMP.bak"
-		// Use the last dot before .bak as the separator (safeName may contain dots like .zshrc)
-		name := strings.TrimSuffix(entry.Name(), ".bak")
-		lastDot := strings.LastIndex(name, ".")
-		created := ""
-		if lastDot >= 0 {
-			created = name[lastDot+1:] // timestamp after the last dot
-		}
-
-		backups = append(backups, Backup{
-			OriginalPath: relativePath,
-			BackupPath:   fullPath,
-			Checksum:     checksum,
-			Created:      created,
-		})
-	}
-
-	// Sort by timestamp descending (newest first)
-	sort.Slice(backups, func(i, j int) bool {
-		return backups[i].Created > backups[j].Created
-	})
-
-	return backups, nil
+	return all[filepath.ToSlash(filepath.Clean(relativePath))], nil
 }
 
-// ListAll returns all backup groups, organized by original path.
+// ListAll returns all backups grouped by original path, each group sorted
+// newest first.
 func (m *Manager) ListAll() (map[string][]Backup, error) {
 	entries, err := os.ReadDir(m.backupDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return make(map[string][]Backup), nil
+			return map[string][]Backup{}, nil
 		}
 		return nil, fmt.Errorf("cannot read backup directory: %w", err)
 	}
-
 	groups := make(map[string][]Backup)
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".bak") {
+	for _, e := range entries {
+		original, ns, ok := parseName(e.Name())
+		if !ok || e.IsDir() {
 			continue
 		}
-
-		// Parse original path from filename: "path__to__file.TIMESTAMP.bak"
-		name := strings.TrimSuffix(entry.Name(), ".bak")
-		lastDot := strings.LastIndex(name, ".")
-		if lastDot < 0 {
-			continue
-		}
-		original := strings.ReplaceAll(name[:lastDot], "__", "/")
-		timestamp := name[lastDot+1:]
-
-		fullPath := filepath.Join(m.backupDir, entry.Name())
-		checksum := computeChecksum(fullPath)
-
+		full := filepath.Join(m.backupDir, e.Name())
 		groups[original] = append(groups[original], Backup{
 			OriginalPath: original,
-			BackupPath:   fullPath,
-			Checksum:     checksum,
-			Created:      timestamp,
+			BackupPath:   full,
+			Checksum:     readChecksum(full),
+			Created:      strconv.FormatInt(ns, 10),
+			Time:         time.Unix(0, ns),
+			Symlink:      e.Type()&os.ModeSymlink != 0,
 		})
 	}
-
+	for k := range groups {
+		g := groups[k]
+		sort.Slice(g, func(i, j int) bool { return g[i].Time.After(g[j].Time) })
+	}
 	return groups, nil
 }
 
-// Verify checks the integrity of a backup by comparing checksums.
+// Verify compares the backup with the checksum recorded when it was made.
+// Legacy backups have no recorded checksum and are reported as valid.
 func (m *Manager) Verify(b Backup) (bool, error) {
-	info, err := os.Stat(b.BackupPath)
+	info, err := os.Lstat(b.BackupPath)
 	if err != nil {
 		return false, fmt.Errorf("backup file missing: %s", b.BackupPath)
 	}
 	if info.IsDir() {
 		return false, fmt.Errorf("backup path is a directory: %s", b.BackupPath)
 	}
-
-	currentChecksum := computeChecksum(b.BackupPath)
-	return currentChecksum == b.Checksum, nil
+	if b.Checksum == "" {
+		b.Checksum = readChecksum(b.BackupPath)
+		if b.Checksum == "" {
+			return true, nil
+		}
+	}
+	current, err := Checksum(b.BackupPath)
+	if err != nil {
+		return false, err
+	}
+	return current == b.Checksum, nil
 }
 
-// Restore restores a file from its backup.
+// Restore writes the backup to targetPath (verifying it first), keeping the
+// original mode. Prefer restoring through a transaction; see Open.
 func (m *Manager) Restore(b Backup, targetPath string) error {
+	if err := m.check(b); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return fmt.Errorf("cannot create target directory: %w", err)
+	}
+	tmp := targetPath + ".dotf-restore-tmp"
+	os.Remove(tmp)
+	if b.Symlink {
+		target, err := os.Readlink(b.BackupPath)
+		if err != nil {
+			return err
+		}
+		if err := os.Symlink(target, tmp); err != nil {
+			return err
+		}
+	} else {
+		info, err := os.Stat(b.BackupPath)
+		if err != nil {
+			return err
+		}
+		if _, err := copyWithChecksum(b.BackupPath, tmp, info.Mode().Perm()); err != nil {
+			os.Remove(tmp)
+			return fmt.Errorf("cannot write temp restore file: %w", err)
+		}
+	}
+	if err := os.Rename(tmp, targetPath); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("cannot finalize restore: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) check(b Backup) error {
 	valid, err := m.Verify(b)
 	if err != nil {
 		return fmt.Errorf("cannot verify backup: %w", err)
@@ -201,53 +272,118 @@ func (m *Manager) Restore(b Backup, targetPath string) error {
 	if !valid {
 		return fmt.Errorf("backup integrity check failed: %s", b.BackupPath)
 	}
-
-	data, err := os.ReadFile(b.BackupPath)
-	if err != nil {
-		return fmt.Errorf("cannot read backup: %w", err)
-	}
-
-	// Ensure target directory exists
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-		return fmt.Errorf("cannot create target directory: %w", err)
-	}
-
-	// Write atomically via temp file
-	tmpPath := targetPath + ".dotf-restore-tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return fmt.Errorf("cannot write temp restore file: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, targetPath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("cannot finalize restore: %w", err)
-	}
-
 	return nil
 }
 
-// prune removes old backups beyond the retention limit.
+// Content describes a verified backup so it can be restored through a
+// transaction: either a symlink target or a readable file with its mode.
+type Content struct {
+	LinkTarget string // non-empty for symlink backups
+	Mode       os.FileMode
+	Open       func() (io.ReadCloser, error)
+}
+
+// Open verifies b and returns its content.
+func (m *Manager) Open(b Backup) (*Content, error) {
+	if err := m.check(b); err != nil {
+		return nil, err
+	}
+	if b.Symlink {
+		target, err := os.Readlink(b.BackupPath)
+		if err != nil {
+			return nil, err
+		}
+		return &Content{LinkTarget: target}, nil
+	}
+	info, err := os.Stat(b.BackupPath)
+	if err != nil {
+		return nil, err
+	}
+	return &Content{
+		Mode: info.Mode().Perm(),
+		Open: func() (io.ReadCloser, error) { return os.Open(b.BackupPath) },
+	}, nil
+}
+
+// prune removes the oldest backups of relativePath beyond the limit.
 func (m *Manager) prune(relativePath string) {
 	backups, err := m.List(relativePath)
 	if err != nil || len(backups) <= m.maxKeep {
 		return
 	}
-
-	// Remove oldest backups beyond the limit
-	for i := m.maxKeep; i < len(backups); i++ {
-		if err := os.Remove(backups[i].BackupPath); err != nil {
-			// Log but don't fail the backup operation due to prune failure
-			fmt.Fprintf(os.Stderr, "warning: could not prune old backup %s: %v\n", backups[i].BackupPath, err)
+	for _, b := range backups[m.maxKeep:] {
+		if err := os.Remove(b.BackupPath); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not prune old backup %s: %v\n", b.BackupPath, err)
+			continue
 		}
+		os.Remove(b.BackupPath + ".sha256")
 	}
 }
 
-// computeChecksum returns the SHA-256 checksum of a file.
-func computeChecksum(path string) string {
-	data, err := os.ReadFile(path)
+// Checksum returns "sha256:<hex>" for a regular file, or a checksum of the
+// target for a symlink.
+func Checksum(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(path)
+		if err != nil {
+			return "", err
+		}
+		return linkChecksum(target), nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func linkChecksum(target string) string {
+	h := sha256.Sum256([]byte("symlink:" + target))
+	return "sha256:" + hex.EncodeToString(h[:])
+}
+
+func readChecksum(backupPath string) string {
+	data, err := os.ReadFile(backupPath + ".sha256")
 	if err != nil {
 		return ""
 	}
-	hash := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(hash[:])
+	return strings.TrimSpace(string(data))
+}
+
+// copyWithChecksum copies src to a new file dst with mode and returns the
+// checksum of what was written.
+func copyWithChecksum(src, dst string, mode os.FileMode) (string, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	_, err = io.Copy(io.MultiWriter(out, h), in)
+	if err == nil {
+		err = out.Sync()
+	}
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(dst, mode)
+	}
+	if err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }

@@ -111,7 +111,7 @@ func TestBackupNameFormatResolution(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		name := backupName(tt.input)
+		name := backupName(tt.input, time.Now().UnixNano())
 		if name == "" {
 			t.Fatalf("backupName(%q) returned empty", tt.input)
 		}
@@ -120,9 +120,12 @@ func TestBackupNameFormatResolution(t *testing.T) {
 		}
 		// Verify no path separators remain in the safe name (they should be __)
 		safePart := strings.TrimSuffix(name, ".bak")
-		// The format is: safePath.TIMESTAMP.bak
+		// The format is: escapedPath@TIMESTAMP.bak
 		if strings.Contains(safePart, "/") {
 			t.Fatalf("backupName(%q) = %q, contains path separator", tt.input, name)
+		}
+		if orig, _, ok := parseName(name); !ok || orig != tt.input {
+			t.Fatalf("parseName(%q) = %q, want %q", name, orig, tt.input)
 		}
 	}
 }

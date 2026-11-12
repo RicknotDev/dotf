@@ -39,3 +39,6 @@ coverage.html
 # Temp files
 /tmp/
 
+
+# Release builds
+/dist/

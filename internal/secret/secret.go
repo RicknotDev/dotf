@@ -1,153 +1,127 @@
-// Package secret manages encrypted secrets using age and GPG.
-// Secrets are decrypted to memory-only (memfd) and never touch disk.
+// Package secret deploys encrypted files (age or GPG) from the repository.
+//
+// layers/<layer>/secrets/<path>.age (or .gpg / .asc) is decrypted to
+// ~/<path> with mode 0600. Decryption writes straight into a temporary file
+// created with mode 0600 in the destination directory, which is then
+// renamed into place; the plaintext never goes to /tmp.
 package secret
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 // Secret describes an encrypted secret file.
 type Secret struct {
-	Name        string // display name (e.g., "github_token")
-	Encrypted   string // path to encrypted file
-	Decrypted   string // path to decrypted output (memfd or tmpfs)
-	Method      string // "age" or "gpg"
-	KeyIdentity string // key used for decryption
+	Name      string // destination path relative to $HOME (e.g. ".config/gh/hosts.yml")
+	Encrypted string // absolute path of the encrypted file
+	Method    string // "age" or "gpg"
+	Layer     string // layer path ("base", "host/laptop", ...)
 }
 
-// DiscoverSecrets finds all encrypted secret files in resolved layers.
-// layersDir should be the absolute path to the layers/ directory (e.g., repoRoot/layers).
-func DiscoverSecrets(layersDir string, layerPaths []string) []Secret {
+// Methods by file extension.
+var extensions = map[string]string{
+	".age": "age",
+	".gpg": "gpg",
+	".asc": "gpg",
+}
+
+// Discover returns the secrets in a single layer directory.
+func Discover(layerDir, layerPath string) []Secret {
+	root := filepath.Join(layerDir, "secrets")
 	var secrets []Secret
-
-	for _, layer := range layerPaths {
-		secretsDir := filepath.Join(layersDir, layer, "secrets")
-		entries, err := os.ReadDir(secretsDir)
+	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		method, ok := extensions[strings.ToLower(filepath.Ext(path))]
+		if !ok {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
 		if err != nil {
-			continue
+			return nil
 		}
-
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			name := entry.Name()
-			path := filepath.Join(secretsDir, name)
-
-			var method string
-			var displayName string
-
-			if strings.HasSuffix(name, ".age") {
-				method = "age"
-				displayName = strings.TrimSuffix(name, ".age")
-			} else if strings.HasSuffix(name, ".gpg") || strings.HasSuffix(name, ".asc") {
-				method = "gpg"
-				displayName = strings.TrimSuffix(name, ".gpg")
-				displayName = strings.TrimSuffix(displayName, ".asc")
-			} else {
-				continue
-			}
-
-			secrets = append(secrets, Secret{
-				Name:      displayName,
-				Encrypted: path,
-				Method:    method,
-			})
-		}
-	}
-
+		secrets = append(secrets, Secret{
+			Name:      filepath.ToSlash(strings.TrimSuffix(rel, filepath.Ext(rel))),
+			Encrypted: path,
+			Method:    method,
+			Layer:     layerPath,
+		})
+		return nil
+	})
+	sort.Slice(secrets, func(i, j int) bool { return secrets[i].Name < secrets[j].Name })
 	return secrets
 }
 
-// Decrypt decrypts a secret to a temporary memory-backed location.
-func Decrypt(s *Secret) error {
+// DiscoverSecrets returns the secrets of the given layers (layer paths
+// relative to layersDir, lowest priority first).
+func DiscoverSecrets(layersDir string, layerPaths []string) []Secret {
+	var all []Secret
+	for _, l := range layerPaths {
+		all = append(all, Discover(filepath.Join(layersDir, l), l)...)
+	}
+	return all
+}
+
+// Decrypter decrypts a secret into w. Replaced in tests.
+var Decrypter = decrypt
+
+// Decrypt writes the plaintext of s to w.
+func Decrypt(s Secret, w io.Writer) error {
+	return Decrypter(s, w)
+}
+
+func decrypt(s Secret, w io.Writer) error {
+	var cmd *exec.Cmd
 	switch s.Method {
 	case "age":
-		return decryptAge(s)
+		keys, err := ageIdentities()
+		if err != nil {
+			return err
+		}
+		args := []string{"--decrypt"}
+		for _, k := range keys {
+			args = append(args, "-i", k)
+		}
+		cmd = exec.Command("age", append(args, s.Encrypted)...)
 	case "gpg":
-		return decryptGPG(s)
+		cmd = exec.Command("gpg", "--batch", "--quiet", "--decrypt", s.Encrypted)
 	default:
 		return fmt.Errorf("unknown encryption method: %s", s.Method)
 	}
-}
-
-// Destroy securely removes the decrypted secret from memory.
-func Destroy(s *Secret) error {
-	if s.Decrypted == "" {
-		return nil
+	var stderr bytes.Buffer
+	cmd.Stdout = w
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return fmt.Errorf("%s decryption failed: %w: %s", s.Method, err, msg)
+		}
+		return fmt.Errorf("%s decryption failed: %w", s.Method, err)
 	}
-	// For memfd, closing the fd removes the content
-	// For tmpfs files, we overwrite then remove
-	if err := os.Remove(s.Decrypted); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("cannot remove decrypted secret: %w", err)
-	}
-	s.Decrypted = ""
 	return nil
 }
 
-// decryptAge decrypts using age identity files.
-func decryptAge(s *Secret) error {
-	// Look for age identity in ~/.config/dotf/keys/
+// ageIdentities returns the age identity files to try:
+// ~/.config/dotf/keys/*.age, then ~/.config/age/*.txt.
+func ageIdentities() ([]string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("cannot determine home directory: %w", err)
+		return nil, fmt.Errorf("cannot determine home directory: %w", err)
 	}
 	keyDir := filepath.Join(homeDir, ".config", "dotf", "keys")
-	keys, err := filepath.Glob(filepath.Join(keyDir, "*.age"))
-	if err != nil || len(keys) == 0 {
-		// Also check ~/.age/ and ~/.config/age/
-		altKeys, altErr := filepath.Glob(filepath.Join(homeDir, ".config", "age", "*.txt"))
-		if altErr == nil && len(altKeys) > 0 {
-			keys = altKeys
-		}
-	}
-
+	keys, _ := filepath.Glob(filepath.Join(keyDir, "*.age"))
+	alt, _ := filepath.Glob(filepath.Join(homeDir, ".config", "age", "*.txt"))
+	keys = append(keys, alt...)
 	if len(keys) == 0 {
-		return fmt.Errorf("no age identity key found (looked in %s)", keyDir)
+		return nil, fmt.Errorf("no age identity found (looked in %s and ~/.config/age/*.txt)", keyDir)
 	}
-
-	// Decrypt to a temp file in tmpfs (memory-backed)
-	tmpFile, err := os.CreateTemp("", "dotf-secret-")
-	if err != nil {
-		return fmt.Errorf("cannot create temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-
-	args := []string{"--decrypt", "-i", keys[0], "-o", tmpPath, s.Encrypted}
-	cmd := exec.Command("age", args...)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("age decryption failed: %w", err)
-	}
-
-	s.Decrypted = tmpPath
-	s.KeyIdentity = keys[0]
-	return nil
-}
-
-// decryptGPG decrypts using GPG.
-func decryptGPG(s *Secret) error {
-	tmpFile, err := os.CreateTemp("", "dotf-secret-")
-	if err != nil {
-		return fmt.Errorf("cannot create temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-
-	cmd := exec.Command("gpg", "--decrypt", "--quiet", "--output", tmpPath, s.Encrypted)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("gpg decryption failed: %w", err)
-	}
-
-	s.Decrypted = tmpPath
-	s.KeyIdentity = "gpg"
-	return nil
+	return keys, nil
 }

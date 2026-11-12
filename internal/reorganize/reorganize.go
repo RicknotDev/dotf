@@ -1,6 +1,8 @@
 // Package reorganize detects flat dotfiles repository structures and reorganizes
 // them into the layered structure that DOTF expects. It never modifies the
-// original files — it creates the layer structure and copies/symlinks files into it.
+// original files: it creates layers/ and copies files into it (keeping their
+// permissions). Only directories with a known mapping are copied; files at
+// the repository root (README, LICENSE...) are left out.
 package reorganize
 
 import (
@@ -11,49 +13,58 @@ import (
 	"strings"
 )
 
-// AppLayerMap maps flat application directory names to their corresponding
-// layer type/name paths within the layers/ directory structure.
+// AppLayerMap maps flat application directory names (stow-style packages:
+// each directory mirrors $HOME) to layer paths. Tools that are not tied to
+// one window manager, shell or terminal go to base so they are always
+// active.
 var AppLayerMap = map[string]string{
-	"alacritty":  "terminal/alacritty",
-	"awesome":    "wm/awesome",
+	// terminals
+	"alacritty": "terminal/alacritty",
+	"foot":      "terminal/foot",
+	"ghostty":   "terminal/ghostty",
+	"kitty":     "terminal/kitty",
+	"wezterm":   "terminal/wezterm",
+	// window managers / compositors
+	"awesome":  "wm/awesome",
+	"bspwm":    "wm/bspwm",
+	"hypr":     "wm/hyprland",
+	"hyprland": "wm/hyprland",
+	"i3":       "wm/i3",
+	"niri":     "wm/niri",
+	"qtile":    "wm/qtile",
+	"river":    "wm/river",
+	"sway":     "wm/sway",
+	// shells
+	"bash": "shell/bash",
+	"fish": "shell/fish",
+	"zsh":  "shell/zsh",
+	// everything else is always active
+	"bat":        "base",
+	"btop":       "base",
 	"cht-sh":     "base",
-	"fish":       "shell/fish",
+	"dunst":      "base",
+	"fastfetch":  "base",
 	"flameshot":  "base",
-	"ghostty":    "terminal/ghostty",
+	"git":        "base",
+	"htop":       "base",
+	"lazygit":    "base",
+	"mako":       "base",
+	"mpv":        "base",
 	"neofetch":   "base",
 	"nix":        "base",
-	"picom":      "wm/picom",
+	"nvim":       "base",
+	"picom":      "base",
+	"polybar":    "base",
 	"presenterm": "base",
-	"rofi":       "wm/rofi",
+	"ranger":     "base",
+	"rofi":       "base",
 	"scripts":    "base",
-	"starship":   "shell/starship",
+	"starship":   "base",
 	"tmux":       "base",
+	"vim":        "base",
+	"waybar":     "base",
 	"yazi":       "base",
-	"zsh":        "shell/zsh",
-}
-
-// DetectionLayerDirs lists empty layer directories that should be created
-// for automatic detection to work properly.
-var DetectionLayerDirs = []string{
-	"distro/arch",
-	"distro/fedora",
-	"distro/ubuntu",
-	"distro/nixos",
-	"wm/hyprland",
-	"wm/awesome",
-	"wm/qtile",
-	"wm/sway",
-	"shell/bash",
-	"shell/zsh",
-	"shell/fish",
-	"terminal/alacritty",
-	"terminal/ghostty",
-	"terminal/kitty",
-	"device/laptop",
-	"device/desktop",
-	"gpu/amd",
-	"gpu/nvidia",
-	"gpu/intel",
+	"zathura":    "base",
 }
 
 // Result describes what the reorganization did.
@@ -62,6 +73,15 @@ type Result struct {
 	Created []string       // created directories
 	Skipped []string       // skipped app dirs with reasons
 	Orphans []string       // flat dirs that couldn't be mapped
+}
+
+func (r *Result) addCreated(layerPath string) {
+	for _, c := range r.Created {
+		if c == layerPath {
+			return
+		}
+	}
+	r.Created = append(r.Created, layerPath)
 }
 
 // Analyze scans the dotfiles directory and determines which flat directories
@@ -105,7 +125,7 @@ func Analyze(dotfilesDir string) (*Result, error) {
 		if isSubmodule(srcDir) {
 			count := countFiles(srcDir)
 			if count > 0 {
-				result.Moved[layerPath] = count
+				result.Moved[layerPath] += count
 			} else {
 				result.Skipped = append(result.Skipped, name+" (empty)")
 			}
@@ -118,7 +138,7 @@ func Analyze(dotfilesDir string) (*Result, error) {
 			continue
 		}
 
-		result.Moved[layerPath] = len(files)
+		result.Moved[layerPath] += len(files)
 	}
 
 	return result, nil
@@ -155,8 +175,7 @@ func Reorganize(dotfilesDir string, result *Result) error {
 			if err := copyDir(srcDir, targetDir); err != nil {
 				return fmt.Errorf("cannot copy submodule %s: %w", appName, err)
 			}
-			result.Created = append(result.Created, layerPath)
-			result.Moved[layerPath] = countFiles(srcDir)
+			result.addCreated(layerPath)
 			continue
 		}
 
@@ -170,7 +189,7 @@ func Reorganize(dotfilesDir string, result *Result) error {
 		if err := os.MkdirAll(targetDir, 0755); err != nil {
 			return fmt.Errorf("cannot create layer directory %s: %w", targetDir, err)
 		}
-		result.Created = append(result.Created, layerPath)
+		result.addCreated(layerPath)
 
 		// Copy each file from flat dir to layer dir
 		for _, relPath := range files {
@@ -182,45 +201,8 @@ func Reorganize(dotfilesDir string, result *Result) error {
 				return fmt.Errorf("cannot create directory %s: %w", filepath.Dir(dstFile), err)
 			}
 
-			// Read source and write to destination
-			data, err := os.ReadFile(srcFile)
-			if err != nil {
-				return fmt.Errorf("cannot read %s: %w", srcFile, err)
-			}
-			if err := os.WriteFile(dstFile, data, 0644); err != nil {
-				return fmt.Errorf("cannot write %s: %w", dstFile, err)
-			}
-		}
-	}
-
-	// Create detection layer directories (only if they don't exist)
-	for _, layerPath := range DetectionLayerDirs {
-		dir := filepath.Join(layersDir, layerPath)
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return fmt.Errorf("cannot create detection layer %s: %w", dir, err)
-			}
-			result.Created = append(result.Created, layerPath)
-		}
-	}
-
-	// Move loose files (like README.md) to base/
-	baseDir := filepath.Join(layersDir, "base")
-	for _, name := range []string{"README.md", "README", "readme.md"} {
-		srcFile := filepath.Join(dotfilesDir, name)
-		dstFile := filepath.Join(baseDir, name)
-		if _, err := os.Stat(srcFile); err == nil {
-			if _, err := os.Stat(dstFile); os.IsNotExist(err) {
-				data, err := os.ReadFile(srcFile)
-				if err != nil {
-					return fmt.Errorf("cannot read %s: %w", srcFile, err)
-				}
-				if err := os.MkdirAll(baseDir, 0755); err != nil {
-					return fmt.Errorf("cannot create base dir: %w", err)
-				}
-				if err := os.WriteFile(dstFile, data, 0644); err != nil {
-					return fmt.Errorf("cannot write %s: %w", dstFile, err)
-				}
+			if err := copyFile(srcFile, dstFile); err != nil {
+				return err
 			}
 		}
 	}
@@ -372,12 +354,24 @@ func copyDir(src, dst string) error {
 			return os.MkdirAll(targetPath, 0755)
 		}
 
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(targetPath, data, 0644)
+		return copyFile(path, targetPath)
 	})
+}
+
+// copyFile copies src to dst keeping src's permission bits.
+func copyFile(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", src, err)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", src, err)
+	}
+	if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("cannot write %s: %w", dst, err)
+	}
+	return os.Chmod(dst, info.Mode().Perm())
 }
 
 // isSubmodule checks if a directory is a git submodule (has a .git entry).
