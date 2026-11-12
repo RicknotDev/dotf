@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/codebuff/dotf/internal/profile"
+	"github.com/RicknotDev/dotf/internal/profile"
 )
 
 // ResolvedLayer represents an existing (on-disk) configuration layer.

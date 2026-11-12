@@ -7,14 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/codebuff/dotf/internal/backup"
-	"github.com/codebuff/dotf/internal/detect"
-	"github.com/codebuff/dotf/internal/hook"
-	"github.com/codebuff/dotf/internal/layer"
-	"github.com/codebuff/dotf/internal/lock"
-	"github.com/codebuff/dotf/internal/pkg"
-	"github.com/codebuff/dotf/internal/state"
-	"github.com/codebuff/dotf/internal/transaction"
+	"github.com/RicknotDev/dotf/internal/backup"
+	"github.com/RicknotDev/dotf/internal/detect"
+	"github.com/RicknotDev/dotf/internal/hook"
+	"github.com/RicknotDev/dotf/internal/layer"
+	"github.com/RicknotDev/dotf/internal/lock"
+	"github.com/RicknotDev/dotf/internal/pkg"
+	"github.com/RicknotDev/dotf/internal/state"
+	"github.com/RicknotDev/dotf/internal/transaction"
 )
 
 // Doctor runs the doctor command.

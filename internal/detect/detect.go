@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/codebuff/dotf/internal/profile"
+	"github.com/RicknotDev/dotf/internal/profile"
 )
 
 // Detect performs full environment detection and returns a Profile.

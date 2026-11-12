@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codebuff/dotf/internal/backup"
-	"github.com/codebuff/dotf/internal/lock"
-	"github.com/codebuff/dotf/internal/transaction"
+	"github.com/RicknotDev/dotf/internal/backup"
+	"github.com/RicknotDev/dotf/internal/lock"
+	"github.com/RicknotDev/dotf/internal/transaction"
 )
 
 // Restore runs the restore command.

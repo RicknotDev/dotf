@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/codebuff/dotf/internal/state"
+	"github.com/RicknotDev/dotf/internal/state"
 )
 
 // Status runs the status command.

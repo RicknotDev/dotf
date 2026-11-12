@@ -7,13 +7,13 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/codebuff/dotf/internal/backup"
-	"github.com/codebuff/dotf/internal/detect"
-	"github.com/codebuff/dotf/internal/layer"
-	"github.com/codebuff/dotf/internal/lock"
-	"github.com/codebuff/dotf/internal/safety"
-	"github.com/codebuff/dotf/internal/state"
-	"github.com/codebuff/dotf/internal/transaction"
+	"github.com/RicknotDev/dotf/internal/backup"
+	"github.com/RicknotDev/dotf/internal/detect"
+	"github.com/RicknotDev/dotf/internal/layer"
+	"github.com/RicknotDev/dotf/internal/lock"
+	"github.com/RicknotDev/dotf/internal/safety"
+	"github.com/RicknotDev/dotf/internal/state"
+	"github.com/RicknotDev/dotf/internal/transaction"
 )
 
 // Apply runs the apply command.

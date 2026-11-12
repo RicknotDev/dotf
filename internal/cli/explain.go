@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/codebuff/dotf/internal/detect"
-	"github.com/codebuff/dotf/internal/layer"
+	"github.com/RicknotDev/dotf/internal/detect"
+	"github.com/RicknotDev/dotf/internal/layer"
 )
 
 // Explain runs the explain command.

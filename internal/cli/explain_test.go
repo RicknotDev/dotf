@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/codebuff/dotf/internal/detect"
+	"github.com/RicknotDev/dotf/internal/detect"
 )
 
 // setupTestRepo creates a minimal DOTF repository structure for testing.

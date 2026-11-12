@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/codebuff/dotf/internal/cli"
+	"github.com/RicknotDev/dotf/internal/cli"
 )
 
 // Version is set at build time via -ldflags -X main.Version=v0.6.0

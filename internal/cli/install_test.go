@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/codebuff/dotf/internal/detect"
-	"github.com/codebuff/dotf/internal/layer"
+	"github.com/RicknotDev/dotf/internal/detect"
+	"github.com/RicknotDev/dotf/internal/layer"
 )
 
 func TestInstallHelp(t *testing.T) {

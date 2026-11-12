@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/codebuff/dotf/internal/lock"
-	"github.com/codebuff/dotf/internal/state"
-	"github.com/codebuff/dotf/internal/transaction"
+	"github.com/RicknotDev/dotf/internal/lock"
+	"github.com/RicknotDev/dotf/internal/state"
+	"github.com/RicknotDev/dotf/internal/transaction"
 )
 
 // Unapply runs the unapply command.

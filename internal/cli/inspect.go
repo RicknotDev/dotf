@@ -8,9 +8,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/codebuff/dotf/internal/detect"
-	"github.com/codebuff/dotf/internal/layer"
-	"github.com/codebuff/dotf/internal/state"
+	"github.com/RicknotDev/dotf/internal/detect"
+	"github.com/RicknotDev/dotf/internal/layer"
+	"github.com/RicknotDev/dotf/internal/state"
 )
 
 // Inspect runs the inspect command.
