@@ -212,4 +212,3 @@ func TestLoadDotfConfigPathTraversal(t *testing.T) {
 		t.Fatalf("expected ['../../etc'], got %v", cfg.Layers)
 	}
 }
-

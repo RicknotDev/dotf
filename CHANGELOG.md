@@ -1,5 +1,72 @@
 # Changelog
 
+## v0.7.0 (unreleased)
+
+This release fixes the problems found in an audit of v0.6.0. Several of them
+could lose user data.
+
+### Fixed: data safety
+
+- **Rollback works.** Transactions journal what existed before each change and
+  roll back every operation (not only unfinished ones), restoring previous files
+  and symlinks. Files are replaced atomically (temp file + rename). Interrupted
+  runs are rolled back after taking the lock on the next run.
+- **No deletion without backup.** If a backup fails, the file is left alone.
+  Foreign symlinks are backed up too.
+- **Backups**: `.zshrc` no longer matches `.zshrc.local`; paths containing `__`
+  are unambiguous; the checksum is stored at creation and verified against that;
+  original permissions are kept; directories are 0700.
+- **`--dry-run` writes nothing**: no state, no lock, no `dotf.yaml`, no hooks.
+- **`hooks/`, `packages/`, `secrets/` are no longer linked into `$HOME`.**
+- **Running as root works** (`/root` is no longer rejected);
+  `~/.ssh/authorized_keys` is blocked instead. Files named `..something` work.
+- **Locking** uses `flock(2)`: no race on creation and no PID guessing.
+  `doctor --unlock` refuses to remove a lock held by a running process.
+- `unapply` only removes what dotf installed and the user did not modify.
+- `restore` uses the newest backup, fails with a non-zero exit code, runs in a
+  transaction and updates the state.
+
+### New
+
+- Secrets are deployed: `secrets/<path>.age|.gpg` to `~/<path>` (0600). `--no-secrets`.
+- `dotf.yaml` profiles: `detect`, `include`, `exclude`, `profiles`, `--profile`.
+- `doctor --fix` / `--emergency` roll back interrupted transactions and recreate
+  missing links and copies.
+- `install` and `apply` share one engine; files removed from the repository are
+  cleaned up; unchanged files are left alone; git URLs are updated on later runs.
+- Packages: per-manager lists, paru/yay preferred, `sudo` when not root,
+  `--no-packages`, option-like names rejected.
+- `--json` on every command; errors are always printed (JSON on stderr with `--json`).
+- `DOTF_BACKUP_KEEP`.
+
+### Changed
+
+- `dotf.yaml` is no longer generated. `layers:` and `hooks.enabled` are ignored;
+  hooks run only with `--allow-hooks` or `DOTF_ALLOW_HOOKS=1`.
+- Exit codes come from the error type; usage errors exit 64. `status` exits 1 on
+  problems also with `--json`.
+- `--quiet` no longer hides errors. Global flags work anywhere and accept
+  `--filter=value`; `key:value` filters use the key.
+- Colors only when stdout is a terminal. `version` and `--help` print to stdout.
+- `status`, `explain`, `doctor` and `inspect` work outside the repository using
+  the recorded one; output is sorted. `inspect overrides` shows the right winner.
+- Hooks run from the repository root, are killed with their process group on
+  timeout, and a failing pre-install hook stops the install.
+- Detection: `ubuntu:GNOME` is gnome; Google and AMD-chipset PCI IDs are not
+  GPUs; hybrid GPUs prefer the discrete card; the PCI fallback uses the device
+  class; Surface devices are not VMs; the shell fallback uses the parent
+  process; tmux and vscode are not terminals; layer names are sanitized.
+- `--reorganize`: picom, rofi and starship go to `base`; README is not copied;
+  no empty layer directories; file modes are kept; larger app map.
+- Module path is `github.com/RicknotDev/dotf`.
+
+### Project
+
+- CI: real gofmt check, version embedded in builds, release assets named
+  `dotf-linux-amd64` / `dotf-linux-arm64`, end-to-end test in a temporary HOME.
+- `dist/` is no longer tracked.
+- Documentation describes only what exists.
+
 ## v0.6.0 (2026-06-16)
 
 ### New Features

@@ -46,7 +46,7 @@ step "install"
 [ ! -e "$HOME/hooks" ] || fail "hooks/ was linked into HOME"
 [ ! -e "$HOME/packages" ] || fail "packages/ was linked into HOME"
 [ ! -e "$HOME/hook-ran" ] || fail "hook ran without --allow-hooks"
-ls "$XDG_STATE_HOME/dotf/backups/" | grep -q '^\.zshrc@' || fail "no backup of the original .zshrc"
+ls -A "$XDG_STATE_HOME/dotf/backups/" | grep -q '^\.zshrc@' || fail "no backup of the original .zshrc"
 [ "$(stat -c %a "$XDG_STATE_HOME/dotf")" = 700 ] || fail "state directory is not 0700"
 
 step "install again is a no-op"
