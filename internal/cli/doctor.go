@@ -1,245 +1,306 @@
 package cli
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/RicknotDev/dotf/internal/backup"
-	"github.com/RicknotDev/dotf/internal/detect"
 	"github.com/RicknotDev/dotf/internal/hook"
-	"github.com/RicknotDev/dotf/internal/layer"
 	"github.com/RicknotDev/dotf/internal/lock"
 	"github.com/RicknotDev/dotf/internal/pkg"
+	"github.com/RicknotDev/dotf/internal/safety"
 	"github.com/RicknotDev/dotf/internal/state"
 	"github.com/RicknotDev/dotf/internal/transaction"
 )
 
-// Doctor runs the doctor command.
-func Doctor(args []string, stateDir string) error {
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	fix := fs.Bool("fix", false, "Attempt to repair detected issues")
-	unlock := fs.Bool("unlock", false, "Force release stale lock")
-	emergency := fs.Bool("emergency", false, "Full system recovery")
-	verifyBackups := fs.Bool("verify-backups", false, "Verify backup integrity")
-	listHooks := fs.Bool("list-hooks", false, "List all available hooks")
-	checkPackages := fs.Bool("check-packages", false, "Validate package lists")
-	help := fs.Bool("help", false, "Show help")
+const doctorHelp = `Usage: dotf doctor [options]
 
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	if *help {
-		fmt.Fprint(os.Stderr, `Usage: dotf doctor [options]
-
-Run diagnostics and repair DOTF installation.
+Check the DOTF installation. Without --fix nothing is changed.
 
 Options:
-  --fix              Attempt to repair detected issues
-  --unlock           Force release stale lock
-  --emergency        Full system recovery
-  --verify-backups   Verify backup integrity
-  --list-hooks       List all available hooks
-  --check-packages   Validate package lists
+  --fix              Repair: roll back interrupted transactions, remove a
+                     leftover lock file, recreate missing links and copies
+                     whose source still exists
+  --unlock           Only remove a leftover lock file (refused while a dotf
+                     process is running)
+  --emergency        --fix plus every optional check below
+  --verify-backups   Verify backup checksums
+  --list-hooks       List the hooks of the active layers
+  --check-packages   Show the package manager and package lists in use
   --help             Show this help message
-`)
+`
+
+type doctorCheck struct {
+	Name   string   `json:"name"`
+	Status string   `json:"status"` // ok, issue, fixed, info
+	Detail string   `json:"detail,omitempty"`
+	Items  []string `json:"items,omitempty"`
+}
+
+type doctorReport struct {
+	cfg    OutputConfig
+	checks []doctorCheck
+	issues int
+}
+
+// add records a check; text mode prints "<title>... <detail>".
+func (r *doctorReport) add(c doctorCheck, title string) {
+	if c.Status == "issue" {
+		r.issues++
+	}
+	r.checks = append(r.checks, c)
+	r.cfg.Printf("%s... %s\n", title, c.Detail)
+	for _, it := range c.Items {
+		r.cfg.Printf("  %s\n", it)
+	}
+}
+
+// Doctor runs the doctor command.
+func Doctor(args []string, stateDir string, cfg OutputConfig) error {
+	fs := newFlagSet("doctor")
+	fix := fs.Bool("fix", false, "")
+	unlock := fs.Bool("unlock", false, "")
+	emergency := fs.Bool("emergency", false, "")
+	verifyBackups := fs.Bool("verify-backups", false, "")
+	listHooks := fs.Bool("list-hooks", false, "")
+	checkPackages := fs.Bool("check-packages", false, "")
+	help := fs.Bool("help", false, "")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if *help {
+		fmt.Fprint(cfg.out(), doctorHelp)
 		return nil
 	}
-
-	repoRoot, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: cannot determine working directory: %v\n", err)
-		repoRoot = "."
+	if *emergency {
+		*fix, *verifyBackups, *listHooks, *checkPackages = true, true, true, true
 	}
 
-	fmt.Println("DOTF Doctor")
-	fmt.Println("===========")
-	fmt.Println()
+	r := &doctorReport{cfg: cfg}
+	cfg.Print("DOTF Doctor")
+	cfg.Print("===========")
+	cfg.Print("")
 
-	issues := 0
-
-	// 1. Check locks
-	fmt.Print("Checking lock status... ")
-	if lock.IsLocked(stateDir) {
-		fmt.Println("LOCKED")
-		fmt.Printf("  Held by: %s\n", lock.LockHolder(stateDir))
-		if *fix || *unlock || *emergency {
-			if err := lock.ForceRelease(stateDir); err != nil {
-				fmt.Printf("  Cannot release lock: %v\n", err)
-			} else {
-				fmt.Println("  Lock released.")
-			}
+	// 1. Lock
+	lockPath := filepath.Join(stateDir, lock.LockFile)
+	_, lockFileErr := os.Stat(lockPath)
+	switch {
+	case lock.IsLocked(stateDir):
+		r.add(doctorCheck{Name: "lock", Status: "issue",
+			Detail: "LOCKED by a running dotf process (" + lock.LockHolder(stateDir) + ")"}, "Checking lock status")
+	case lockFileErr == nil && (*fix || *unlock):
+		if err := lock.ForceRelease(stateDir); err != nil {
+			r.add(doctorCheck{Name: "lock", Status: "issue", Detail: "cannot remove leftover lock file: " + err.Error()}, "Checking lock status")
+		} else {
+			r.add(doctorCheck{Name: "lock", Status: "fixed", Detail: "Stale lock released (no process held it)"}, "Checking lock status")
 		}
-		issues++
+	case lockFileErr == nil:
+		r.add(doctorCheck{Name: "lock", Status: "ok", Detail: "OK (leftover lock file, not held by any process)"}, "Checking lock status")
+	default:
+		r.add(doctorCheck{Name: "lock", Status: "ok", Detail: "OK"}, "Checking lock status")
+	}
+
+	// 2. Repairs that need the lock
+	var sess *session
+	if *fix {
+		s, err := startSession(stateDir, cfg)
+		if err != nil {
+			r.add(doctorCheck{Name: "transactions", Status: "issue", Detail: "cannot repair: " + err.Error()}, "Checking for incomplete transactions")
+		} else {
+			sess = s
+			defer sess.end()
+			r.add(doctorCheck{Name: "transactions", Status: "ok", Detail: "OK (any interrupted transaction was rolled back)"}, "Checking for incomplete transactions")
+		}
+	} else if pending := transaction.Pending(stateDir); len(pending) > 0 {
+		r.add(doctorCheck{Name: "transactions", Status: "issue",
+			Detail: fmt.Sprintf("%d interrupted (run 'dotf doctor --fix' to roll back)", len(pending)), Items: pending}, "Checking for incomplete transactions")
 	} else {
-		fmt.Println("OK")
-		// Check for stale lock that needs removal
-		if *fix || *unlock || *emergency {
-			if lock.LockHolder(stateDir) != "unknown" {
-				if err := lock.ForceRelease(stateDir); err != nil {
-					fmt.Printf("  Cannot release stale lock: %v\n", err)
-				} else {
-					fmt.Println("  Stale lock released.")
-				}
-			}
-		}
+		r.add(doctorCheck{Name: "transactions", Status: "ok", Detail: "OK"}, "Checking for incomplete transactions")
 	}
 
-	// 2. Check state integrity
-	fmt.Print("Checking state integrity... ")
+	// 3. State
 	sm, err := state.NewManager(stateDir)
 	if err != nil {
-		fmt.Printf("ERROR: %v\n", err)
-		issues++
+		r.add(doctorCheck{Name: "state", Status: "issue", Detail: "ERROR: " + err.Error()}, "Checking state integrity")
+	} else if w := sm.Warning(); w != "" {
+		r.add(doctorCheck{Name: "state", Status: "issue", Detail: w}, "Checking state integrity")
 	} else {
-		s := sm.GetState()
-		if s.Version > 0 {
-			fmt.Printf("OK (v%d)\n", s.Version)
-		} else {
-			fmt.Println("empty (first run)")
+		st := sm.GetState()
+		detail := "empty (nothing installed yet)"
+		if len(st.InstalledFiles) > 0 {
+			detail = fmt.Sprintf("OK (v%d, %s)", st.Version, plural(len(st.InstalledFiles), "file"))
 		}
+		r.add(doctorCheck{Name: "state", Status: "ok", Detail: detail}, "Checking state integrity")
 	}
 
-	// 3. Check transaction integrity
-	fmt.Print("Checking for incomplete transactions... ")
-	if err := transaction.RecoverIncomplete(stateDir); err != nil {
-		fmt.Printf("ERROR: %v\n", err)
-		issues++
+	// 4. Repository
+	repoRoot, repoOK, _ := findRepo(stateDir)
+	var layerDirs []string
+	if !repoOK {
+		r.add(doctorCheck{Name: "repository", Status: "info", Detail: "no DOTF repository here and none recorded"}, "Checking repository structure")
+	} else if sel, err := selectLayers(repoRoot, ""); err != nil {
+		r.add(doctorCheck{Name: "repository", Status: "issue", Detail: "ERROR: " + err.Error()}, "Checking repository structure")
 	} else {
-		fmt.Println("OK")
+		for _, l := range sel.Result.Layers {
+			layerDirs = append(layerDirs, l.DirPath)
+		}
+		r.add(doctorCheck{Name: "repository", Status: "ok",
+			Detail: fmt.Sprintf("%s, found %s", repoRoot, plural(len(sel.Result.Layers), "active layer"))}, "Checking repository structure")
 	}
 
-	// 4. Check layers
-	fmt.Print("Checking repository structure... ")
-	p := detect.Detect()
-	result, err := layer.Resolve(repoRoot, p)
-	if err != nil {
-		fmt.Printf("ERROR: %v\n", err)
-		issues++
-	} else {
-		fmt.Printf("found %d layers\n", len(result.Layers))
-	}
-
-	// 5. Check backup integrity
-	if *verifyBackups || *emergency {
-		fmt.Print("Verifying backup integrity... ")
-		backupMgr, err := backup.NewManager(filepath.Join(stateDir, "backups"))
+	// 5. Backups
+	if *verifyBackups {
+		bm, err := backup.NewManager(filepath.Join(stateDir, "backups"))
+		var groups map[string][]backup.Backup
+		if err == nil {
+			groups, err = bm.ListAll()
+		}
 		if err != nil {
-			fmt.Printf("ERROR: %v\n", err)
+			r.add(doctorCheck{Name: "backups", Status: "issue", Detail: "ERROR: " + err.Error()}, "Verifying backup integrity")
 		} else {
-			allBackups, err := backupMgr.ListAll()
-			if err != nil {
-				fmt.Printf("ERROR: %v\n", err)
-			} else if len(allBackups) == 0 {
-				fmt.Println("no backups found")
-			} else {
-				total := 0
-				for _, backups := range allBackups {
-					for _, b := range backups {
-						valid, _ := backupMgr.Verify(b)
-						if !valid {
-							fmt.Printf("CORRUPTED: %s\n", b.BackupPath)
-							issues++
-						}
-						total++
+			total, bad := 0, []string{}
+			for _, list := range groups {
+				for _, b := range list {
+					total++
+					if ok, _ := bm.Verify(b); !ok {
+						bad = append(bad, "CORRUPTED: "+b.BackupPath)
 					}
 				}
-				fmt.Printf("%d backups verified\n", total)
 			}
+			c := doctorCheck{Name: "backups", Status: "ok", Detail: fmt.Sprintf("%d backups verified", total), Items: bad}
+			if len(bad) > 0 {
+				c.Status = "issue"
+				c.Detail = fmt.Sprintf("%d backups verified, %d corrupted", total, len(bad))
+			}
+			r.add(c, "Verifying backup integrity")
 		}
 	}
 
-	// 6. Check symlinks using state (fast: only checks known installed files)
-	fmt.Print("Checking installed symlinks... ")
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Printf("ERROR: cannot determine home directory: %v\n", err)
-		return nil
-	}
-
-	// Use state to get known installed files instead of walking entire $HOME
+	// 6. Installed files
 	if sm != nil {
-		s := sm.GetState()
-		count := 0
-		broken := 0
-		for relPath := range s.InstalledFiles {
-			path := filepath.Join(homeDir, relPath)
-			info, lErr := os.Lstat(path)
-			if lErr != nil {
-				// File doesn't exist — might have been removed
-				fmt.Printf("  MISSING: %s\n", path)
-				issues++
-				count++
-				continue
-			}
-			if info.Mode()&os.ModeSymlink == 0 {
-				continue // not a symlink (was replaced)
-			}
-			target, rErr := os.Readlink(path)
-			if rErr != nil {
-				continue
-			}
-			if strings.HasPrefix(target, repoRoot) {
-				if _, sErr := os.Stat(target); sErr != nil {
-					fmt.Printf("  BROKEN: %s -> %s\n", path, target)
-					issues++
-					broken++
-				}
-				count++
-			}
-		}
-		fmt.Printf("%d symlinks, %d broken\n", count, broken)
-	} else {
-		fmt.Println("state unavailable (skip)")
-	}
-
-	// 7. Check package availability
-	if *checkPackages || *emergency {
-		fmt.Print("Checking package manager... ")
-		if pm := pkg.DetectManager(); pm != nil {
-			fmt.Printf("found %s\n", pm.Name())
+		home, herr := homeDir()
+		if herr != nil {
+			r.add(doctorCheck{Name: "files", Status: "issue", Detail: herr.Error()}, "Checking installed files")
 		} else {
-			fmt.Println("none detected")
+			r.add(checkInstalled(home, stateDir, sm, sess), "Checking installed files")
 		}
 	}
 
-	// 8. List hooks
-	if *listHooks || *emergency {
-		fmt.Println("\nAvailable hooks:")
-		if result != nil {
-			layerDirs := make([]string, len(result.Layers))
-			for i, l := range result.Layers {
-				layerDirs[i] = l.DirPath
-			}
-			hooks := hook.DiscoverHooks(layerDirs)
-			if len(hooks) == 0 {
-				fmt.Println("  (none)")
-			} else {
-				for _, h := range hooks {
-					fmt.Printf("  [%s] %s\n", h.Type, h.Path)
+	// 7. Packages
+	if *checkPackages {
+		c := doctorCheck{Name: "packages", Status: "info", Detail: "no supported package manager found"}
+		if pm := pkg.DetectManager(); pm != nil {
+			used, ignored := pm.ListFiles(layerDirs)
+			c.Detail = fmt.Sprintf("%s; %d list(s) used, %d ignored", pm.Name(), len(used), len(ignored))
+			c.Items = used
+			for _, f := range used {
+				if _, err := pkg.LoadPackages(f); err != nil {
+					c.Status = "issue"
+					c.Items = append(c.Items, "ERROR: "+err.Error())
 				}
 			}
 		}
+		r.add(c, "Checking package manager")
 	}
 
-	fmt.Println()
-	if issues > 0 {
-		fmt.Printf("Found %d issue(s).", issues)
-		if !*fix && !*emergency {
-			fmt.Print(" Use --fix or --emergency to repair.")
+	// 8. Hooks
+	if *listHooks {
+		c := doctorCheck{Name: "hooks", Status: "info", Detail: "(none)"}
+		hooks := hook.DiscoverHooks(layerDirs)
+		if len(hooks) > 0 {
+			c.Detail = plural(len(hooks), "hook")
 		}
-		fmt.Println()
-	} else {
-		fmt.Println("All checks passed.")
+		for _, h := range hooks {
+			c.Items = append(c.Items, fmt.Sprintf("[%s] %s", h.Type, h.Path))
+		}
+		r.add(c, "Available hooks")
 	}
 
-	// Return non-zero exit code if issues found (used by scripts)
-	if issues > 0 {
-		return fmt.Errorf("%d issue(s) found", issues)
+	if cfg.JSON {
+		cfg.PrintJSON(map[string]interface{}{"checks": r.checks, "issues": r.issues})
 	}
-
+	cfg.Print("")
+	if r.issues > 0 {
+		hint := ""
+		if !*fix {
+			hint = " Use --fix to repair."
+		}
+		cfg.Printf("Found %s.%s\n", plural(r.issues, "issue"), hint)
+		return fmt.Errorf("%s found", plural(r.issues, "issue"))
+	}
+	cfg.Print("All checks passed.")
 	return nil
+}
+
+// checkInstalled checks the files recorded in the state; with a session
+// (--fix) it recreates missing links and copies whose source still exists.
+func checkInstalled(home, stateDir string, sm *state.Manager, sess *session) doctorCheck {
+	files := sm.Files()
+	c := doctorCheck{Name: "files", Status: "ok"}
+	var tx *transaction.Transaction
+	if sess != nil {
+		tx, _ = transaction.New(stateDir)
+	}
+	fixed, problems := 0, 0
+	for _, rel := range files {
+		ref, _ := sm.File(rel)
+		e := checkFile(home, rel, ref)
+		if e.Status == StatusOK {
+			continue
+		}
+		_, srcErr := os.Stat(ref.Source)
+		canFix := e.Status == StatusMissing && srcErr == nil && ref.Type != state.TypeSecret
+		if canFix && tx != nil {
+			tgt := safety.ValidateTargetPath(home, rel)
+			var err error
+			if !tgt.Safe {
+				err = fmt.Errorf("%s", tgt.Reason)
+			} else if err = tx.MkdirAll(filepath.Dir(tgt.Normalized), 0o755); err == nil {
+				if ref.Type == state.TypeCopy {
+					err = tx.Copy(ref.Source, tgt.Normalized)
+					if err == nil {
+						ref.Checksum = state.ComputeChecksum(tgt.Normalized)
+						sm.SetFile(rel, ref)
+					}
+				} else {
+					err = tx.Symlink(ref.Source, tgt.Normalized)
+				}
+			}
+			if err == nil {
+				fixed++
+				c.Items = append(c.Items, "RECREATED: "+rel)
+				continue
+			}
+			c.Items = append(c.Items, fmt.Sprintf("CANNOT FIX: %s: %v", rel, err))
+			problems++
+			continue
+		}
+		hint := ""
+		if canFix {
+			hint = " (fixable with --fix)"
+		}
+		c.Items = append(c.Items, fmt.Sprintf("%s: %s (%s)%s", strings.ToUpper(string(e.Status)), rel, e.Detail, hint))
+		problems++
+	}
+	if tx != nil {
+		if err := tx.Commit(); err != nil {
+			c.Items = append(c.Items, "ERROR: "+err.Error())
+			problems++
+		} else if fixed > 0 {
+			if err := sm.Save(); err != nil {
+				c.Items = append(c.Items, "ERROR: "+err.Error())
+			}
+		}
+	}
+	c.Detail = fmt.Sprintf("%s, %d with problems", plural(len(files), "file"), problems)
+	if fixed > 0 {
+		c.Detail += fmt.Sprintf(", %d recreated", fixed)
+		c.Status = "fixed"
+	}
+	if problems > 0 {
+		c.Status = "issue"
+	}
+	return c
 }

@@ -9,14 +9,14 @@ import (
 )
 
 func TestInspectHelp(t *testing.T) {
-	err := Inspect([]string{"--help"}, t.TempDir())
+	err := Inspect([]string{"--help"}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Inspect --help returned error: %v", err)
 	}
 }
 
 func TestInspectNoSubcommand(t *testing.T) {
-	err := Inspect([]string{}, t.TempDir())
+	err := Inspect([]string{}, t.TempDir(), OutputConfig{})
 	if err == nil {
 		t.Fatal("expected error for inspect without subcommand")
 	}
@@ -26,7 +26,7 @@ func TestInspectNoSubcommand(t *testing.T) {
 }
 
 func TestInspectInvalidSubcommand(t *testing.T) {
-	err := Inspect([]string{"nonexistent"}, t.TempDir())
+	err := Inspect([]string{"nonexistent"}, t.TempDir(), OutputConfig{})
 	if err == nil {
 		t.Fatal("expected error for invalid subcommand")
 	}
@@ -42,7 +42,7 @@ func TestInspectLayer(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := Inspect([]string{"layer", "base"}, t.TempDir())
+	err := Inspect([]string{"layer", "base"}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Inspect layer base failed: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestInspectLayerNotFound(t *testing.T) {
 	_ = os.Chdir(dir)
 	defer func() { _ = os.Chdir(oldWd) }()
 
-	err := Inspect([]string{"layer", "nonexistent"}, t.TempDir())
+	err := Inspect([]string{"layer", "nonexistent"}, t.TempDir(), OutputConfig{})
 	if err == nil {
 		t.Fatal("expected error for nonexistent layer")
 	}
@@ -84,7 +84,7 @@ func TestInspectState(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := Inspect([]string{"state"}, stateDir)
+	err := Inspect([]string{"state"}, stateDir, OutputConfig{})
 	if err != nil {
 		t.Fatalf("Inspect state failed: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestInspectOverrides(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := Inspect([]string{"overrides"}, t.TempDir())
+	err := Inspect([]string{"overrides"}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Inspect overrides failed: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestInspectOverrides(t *testing.T) {
 }
 
 func TestInspectFileNoArg(t *testing.T) {
-	err := Inspect([]string{"file"}, t.TempDir())
+	err := Inspect([]string{"file"}, t.TempDir(), OutputConfig{})
 	if err == nil {
 		t.Fatal("expected error for inspect file without path")
 	}
@@ -154,7 +154,7 @@ func TestInspectBackup(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := Inspect([]string{"backup"}, stateDir)
+	err := Inspect([]string{"backup"}, stateDir, OutputConfig{})
 	if err != nil {
 		t.Fatalf("Inspect backup failed: %v", err)
 	}

@@ -172,17 +172,55 @@ func TestReorganizeIdempotent(t *testing.T) {
 	}
 }
 
-func TestDetectLayerDirsCreated(t *testing.T) {
+// Regression: reorganize used to create 19 empty layer directories.
+func TestNoEmptyLayerDirsCreated(t *testing.T) {
 	dir := setupFlatStructure(t)
 	result, _ := Analyze(dir)
-	_ = Reorganize(dir, result)
-
-	// Check that detection layer dirs were created
+	if err := Reorganize(dir, result); err != nil {
+		t.Fatal(err)
+	}
 	for _, layer := range []string{"distro/arch", "shell/bash", "device/desktop"} {
-		d := filepath.Join(dir, "layers", layer)
-		if _, err := os.Stat(d); os.IsNotExist(err) {
-			t.Fatalf("detection layer %s was not created", layer)
+		if _, err := os.Stat(filepath.Join(dir, "layers", layer)); !os.IsNotExist(err) {
+			t.Fatalf("empty layer %s was created", layer)
 		}
+	}
+}
+
+func TestReorganizeRegressions(t *testing.T) {
+	dir := t.TempDir()
+	write := func(p, c string, mode os.FileMode) {
+		full := filepath.Join(dir, p)
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		os.WriteFile(full, []byte(c), mode)
+		os.Chmod(full, mode)
+	}
+	write("README.md", "# my dotfiles", 0o644)
+	write("picom/.config/picom/picom.conf", "x", 0o644)
+	write("rofi/.config/rofi/config.rasi", "x", 0o644)
+	write("starship/.config/starship.toml", "x", 0o644)
+	write("scripts/.local/bin/hello", "#!/bin/sh", 0o755)
+
+	result, err := Analyze(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Reorganize(dir, result); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{".config/picom/picom.conf", ".config/rofi/config.rasi", ".config/starship.toml"} {
+		if _, err := os.Stat(filepath.Join(dir, "layers", "base", p)); err != nil {
+			t.Fatalf("%s should be in base: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "layers", "base", "README.md")); !os.IsNotExist(err) {
+		t.Fatal("README.md must not be copied into base (it would end up in ~/README.md)")
+	}
+	info, err := os.Stat(filepath.Join(dir, "layers", "base", ".local", "bin", "hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("script mode %o, want 755", info.Mode().Perm())
 	}
 }
 

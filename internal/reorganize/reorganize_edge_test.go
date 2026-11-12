@@ -178,14 +178,8 @@ func TestReorganizeFlatStructureWithGitSubmodule(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// nvim is not in AppLayerMap, so it should be an orphan
-	foundNvim := false
-	for _, o := range result.Orphans {
-		if o == "nvim" {
-			foundNvim = true
-		}
-	}
-	if !foundNvim {
-		t.Fatalf("expected nvim in orphans, got %v", result.Orphans)
+	// nvim maps to base; a submodule is counted with all its files
+	if n := result.Moved["base"]; n != 3 {
+		t.Fatalf("expected 3 files moved to base for the nvim submodule, got %v", result.Moved)
 	}
 }

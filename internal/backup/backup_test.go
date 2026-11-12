@@ -79,7 +79,7 @@ func TestCreateBackupSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create a symlink (should not be backed up)
+	// A symlink is backed up as a symlink with the same target
 	target := filepath.Join(dir, "target")
 	_ = os.WriteFile(target, []byte("data"), 0644)
 	link := filepath.Join(dir, "link")
@@ -89,8 +89,14 @@ func TestCreateBackupSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() for symlink failed: %v", err)
 	}
-	if b != nil {
-		t.Fatal("expected nil backup for symlink")
+	if b == nil || !b.Symlink {
+		t.Fatal("expected a symlink backup")
+	}
+	if got, _ := os.Readlink(b.BackupPath); got != target {
+		t.Fatalf("backup link points to %q, want %q", got, target)
+	}
+	if ok, err := m.Verify(*b); err != nil || !ok {
+		t.Fatalf("symlink backup should verify: %v", err)
 	}
 }
 
@@ -259,12 +265,13 @@ func TestBackupPruning(t *testing.T) {
 }
 
 func TestBackupNameFormat(t *testing.T) {
-	name := backupName("path/to/file.conf")
-	if !strings.HasSuffix(name, ".bak") {
-		t.Fatalf("expected .bak suffix, got %s", name)
+	name := backupName("path/to/file.conf", 42)
+	if name != "path%2Fto%2Ffile.conf@42.bak" {
+		t.Fatalf("unexpected backup name %s", name)
 	}
-	if !strings.Contains(name, "path__to__file.conf") {
-		t.Fatalf("expected path__to__file.conf in name, got %s", name)
+	orig, ns, ok := parseName(name)
+	if !ok || orig != "path/to/file.conf" || ns != 42 {
+		t.Fatalf("parseName(%q) = %q, %d, %v", name, orig, ns, ok)
 	}
 }
 

@@ -9,8 +9,10 @@ import (
 	"strings"
 )
 
-// Common sensitive system paths that must never be targeted by symlinks.
-var sensitivePaths = []string{
+// SensitivePaths are system paths that must never be targeted. Entries that
+// are the home directory itself or one of its parents are ignored (see
+// ValidateTargetPath).
+var SensitivePaths = []string{
 	"/etc/passwd",
 	"/etc/shadow",
 	"/etc/sudoers",
@@ -60,7 +62,7 @@ func ValidateLayerFile(repoRoot, layerFile string) *PathValidationResult {
 	if err != nil {
 		return fail("cannot compute relative path: %v", err)
 	}
-	if strings.HasPrefix(rel, "..") {
+	if escapes(filepath.ToSlash(rel)) {
 		return fail("path escapes repository root: %s", rel)
 	}
 
@@ -92,7 +94,7 @@ func ValidateLayerFile(repoRoot, layerFile string) *PathValidationResult {
 
 			// Must stay within repository
 			targetRel, err := filepath.Rel(absRepo, target)
-			if err != nil || strings.HasPrefix(targetRel, "..") {
+			if err != nil || escapes(filepath.ToSlash(targetRel)) {
 				return fail("symlink escapes repository: %s -> %s", current, target)
 			}
 
@@ -114,39 +116,62 @@ func ValidateLayerFile(repoRoot, layerFile string) *PathValidationResult {
 	}
 }
 
+// homeRelativeBlocked lists paths (relative to $HOME) that DOTF never
+// writes, because doing so grants access to the account.
+var homeRelativeBlocked = []string{
+	".ssh/authorized_keys",
+	".ssh/authorized_keys2",
+}
+
+// escapes reports whether a cleaned relative path leaves its base directory.
+// "..foo" is a valid file name and does not escape.
+func escapes(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, "../")
+}
+
 // ValidateTargetPath validates where a file will be installed in $HOME.
 func ValidateTargetPath(homeDir, relativePath string) *PathValidationResult {
-	// 1. Clean paths
 	cleanHome := filepath.Clean(homeDir)
 	absHome, err := filepath.Abs(cleanHome)
 	if err != nil {
 		return fail("cannot resolve home directory: %v", err)
 	}
 
-	cleanRel := filepath.Clean(relativePath)
-	if strings.HasPrefix(cleanRel, "..") {
+	if filepath.IsAbs(relativePath) {
+		return fail("relative path is absolute: %s", relativePath)
+	}
+	cleanRel := filepath.ToSlash(filepath.Clean(relativePath))
+	if escapes(cleanRel) || cleanRel == "." {
 		return fail("relative path escapes: %s", relativePath)
 	}
 
 	target := filepath.Join(absHome, cleanRel)
-
-	// 2. Verify target is within home directory
 	targetRel, err := filepath.Rel(absHome, target)
 	if err != nil {
 		return fail("cannot compute target path: %v", err)
 	}
-	if strings.HasPrefix(targetRel, "..") {
+	if escapes(filepath.ToSlash(targetRel)) {
 		return fail("target escapes home directory: %s", target)
 	}
 
-	// 3. Check absolute path length
 	if len(target) > MaxFilePath {
 		return fail("path too long (%d chars, max %d)", len(target), MaxFilePath)
 	}
 
-	// 4. Check against sensitive paths
-	for _, sp := range sensitivePaths {
+	for _, blocked := range homeRelativeBlocked {
+		if cleanRel == blocked {
+			return fail("refusing to manage %s (grants login access)", blocked)
+		}
+	}
+
+	// System paths only matter when they are not the home directory itself
+	// or one of its parents: for root, $HOME is /root and every target is
+	// necessarily inside it.
+	for _, sp := range SensitivePaths {
 		absSP, _ := filepath.Abs(sp)
+		if absSP == absHome || strings.HasPrefix(absHome, absSP+"/") {
+			continue
+		}
 		if target == absSP || strings.HasPrefix(target, absSP+"/") {
 			return fail("target is a sensitive system path: %s", sp)
 		}
@@ -164,7 +189,7 @@ func IsSensitivePath(path string) bool {
 	if err != nil {
 		return false
 	}
-	for _, sp := range sensitivePaths {
+	for _, sp := range SensitivePaths {
 		absSP, _ := filepath.Abs(sp)
 		if abs == absSP || strings.HasPrefix(abs, absSP+"/") {
 			return true

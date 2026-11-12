@@ -17,7 +17,7 @@ func TestIntegrationInstallWithLocalPath(t *testing.T) {
 	stateDir := t.TempDir()
 
 	// Run install with the local repo path, using --dry-run to avoid touching real home
-	err := Install([]string{"--dry-run", repoDir}, stateDir)
+	err := Install([]string{"--dry-run", repoDir}, stateDir, OutputConfig{})
 	if err != nil {
 		t.Fatalf("Install with local path failed: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestIntegrationInstallWithoutLayers(t *testing.T) {
 	emptyDir := t.TempDir()
 	stateDir := t.TempDir()
 
-	err := Install([]string{emptyDir}, stateDir)
+	err := Install([]string{emptyDir}, stateDir, OutputConfig{})
 	if err == nil {
 		t.Fatal("expected error for repo without layers/")
 	}
@@ -46,7 +46,7 @@ func TestIntegrationInstallIdempotent(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 
 	// First install
-	err := Install([]string{"--copy", repoDir}, stateDir)
+	err := Install([]string{"--copy", repoDir}, stateDir, OutputConfig{})
 	if err != nil {
 		t.Fatalf("First install failed: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestIntegrationInstallIdempotent(t *testing.T) {
 	}
 
 	// Second install should be idempotent (no errors, files still exist)
-	err = Install([]string{"--copy", repoDir}, stateDir)
+	err = Install([]string{"--copy", repoDir}, stateDir, OutputConfig{})
 	if err != nil {
 		t.Fatalf("Second install (idempotent) failed: %v", err)
 	}
@@ -499,7 +499,7 @@ func TestIntegrationStatusConsistentWithInstall(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 
 	// Install with copy mode
-	err := Install([]string{"--copy", repoDir}, stateDir)
+	err := Install([]string{"--copy", repoDir}, stateDir, OutputConfig{})
 	if err != nil {
 		t.Fatalf("Install failed: %v", err)
 	}

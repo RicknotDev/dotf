@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,15 +16,11 @@ func detectShell() string {
 		return normalizeShell(shell)
 	}
 
-	// Fallback: check parent process
-	ppid := os.Getenv("PPID")
-	if ppid != "" {
-		comm, err := os.ReadFile("/proc/" + ppid + "/comm")
-		if err == nil {
-			return strings.TrimSpace(string(comm))
-		}
+	// Fallback: the parent process is usually the shell
+	comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", os.Getppid()))
+	if err == nil {
+		return normalizeShell(strings.TrimSpace(string(comm)))
 	}
-
 	return ""
 }
 

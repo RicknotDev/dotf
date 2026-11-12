@@ -1,6 +1,8 @@
-// Package hook provides sandboxed execution of user-defined hooks.
-// Hooks are scripts that run before/after installation phases.
-// They are opt-in, timed out, logged, and sandboxed by default.
+// Package hook runs user-defined hook scripts (layers/<layer>/hooks/*.sh)
+// before and after installation phases. Hooks are opt-in (--allow-hooks or
+// DOTF_ALLOW_HOOKS=1), run with /bin/sh from the repository root, are killed
+// with their whole process group after a timeout, and are logged. They are
+// not otherwise sandboxed: an allowed hook runs with your privileges.
 package hook
 
 import (
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -83,66 +86,61 @@ func DiscoverHooks(layerPaths []string) []Hook {
 	}
 
 	// Sort by type priority: pre hooks first, post hooks last, error hooks in between
-	sort.Slice(hooks, func(i, j int) bool {
+	sort.SliceStable(hooks, func(i, j int) bool {
 		return hookPriority(hooks[i].Type) < hookPriority(hooks[j].Type)
 	})
 
 	return hooks
 }
 
-// Execute runs a hook with sandboxing.
-func Execute(h Hook, logFile string, allowHooks bool) *ExecutionResult {
-	if !allowHooks {
-		return &ExecutionResult{
-			Hook:    h,
-			Success: false,
-			Output:  "hooks are disabled (use --allow-hooks to enable)",
-		}
-	}
+// Options control how hooks run.
+type Options struct {
+	RepoRoot string // working directory of the hook and $DOTF_DIR
+	HomeDir  string // $DOTF_HOME
+	Profile  string // $DOTF_PROFILE
+	LogFile  string // appended to, mode 0600 ("" disables logging)
+}
 
+// Execute runs a single hook with /bin/sh in its own process group, so the
+// timeout kills the whole tree it started, not just the shell.
+func Execute(h Hook, opts Options) *ExecutionResult {
 	start := time.Now()
-
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), h.Timeout)
+	timeout := h.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "/bin/sh", h.Path)
-
-	// No stdin (prevent interactive hooks)
+	cmd.Dir = opts.RepoRoot
 	cmd.Stdin = nil
-
-	// Capture output
 	var output strings.Builder
 	cmd.Stdout = &output
 	cmd.Stderr = &output
-
-	// Set environment with DOTF-specific variables
-	// Detect DOTF_HOME from environment or use home directory
-	dotfHome := os.Getenv("DOTF_HOME")
-	if dotfHome == "" {
-		if hd, err := os.UserHomeDir(); err == nil {
-			dotfHome = hd
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
 		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
-	dotfDir := os.Getenv("DOTF_DIR")
-	if dotfDir == "" {
-		if wd, err := os.Getwd(); err == nil {
-			dotfDir = wd
-		}
-	}
-
+	// Grandchildren may keep the output pipe open; don't wait for them forever.
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = append(os.Environ(),
 		"DOTF_HOOK=true",
 		fmt.Sprintf("DOTF_HOOK_TYPE=%s", h.Type),
 		fmt.Sprintf("DOTF_HOOK_LAYER=%s", h.Layer),
-		fmt.Sprintf("DOTF_PROFILE=%s", os.Getenv("DOTF_PROFILE")),
-		fmt.Sprintf("DOTF_DIR=%s", dotfDir),
-		fmt.Sprintf("DOTF_HOME=%s", dotfHome),
+		fmt.Sprintf("DOTF_PROFILE=%s", opts.Profile),
+		fmt.Sprintf("DOTF_DIR=%s", opts.RepoRoot),
+		fmt.Sprintf("DOTF_HOME=%s", opts.HomeDir),
 	)
 
 	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		err = fmt.Errorf("timed out after %v", timeout)
+	}
 	duration := time.Since(start)
-
 	result := &ExecutionResult{
 		Hook:     h,
 		Success:  err == nil,
@@ -151,42 +149,50 @@ func Execute(h Hook, logFile string, allowHooks bool) *ExecutionResult {
 		Error:    err,
 	}
 
-	// Log to log file
-	logEntry := fmt.Sprintf("[%s] %s/%s: success=%v duration=%v\n  %s\n",
-		time.Now().Format(time.RFC3339),
-		h.Layer, h.Type,
-		result.Success, duration,
-		strings.TrimSpace(result.Output))
-
-	if logFile != "" {
-		f, fErr := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if fErr == nil {
-			if _, writeErr := f.WriteString(logEntry); writeErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not write to hook log: %v\n", writeErr)
+	if opts.LogFile != "" {
+		entry := fmt.Sprintf("[%s] %s/%s: success=%v duration=%v\n  %s\n",
+			time.Now().Format(time.RFC3339), h.Layer, h.Type,
+			result.Success, duration.Round(time.Millisecond),
+			strings.TrimSpace(result.Output))
+		if err := os.MkdirAll(filepath.Dir(opts.LogFile), 0o700); err == nil {
+			if f, err := os.OpenFile(opts.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+				f.WriteString(entry)
+				f.Close()
 			}
-			f.Close()
 		}
 	}
-
 	return result
 }
 
-// ExecuteAll runs all hooks of a given type and returns results.
-func ExecuteAll(hooks []Hook, hookType HookType, logFile string, allowHooks bool) []*ExecutionResult {
-	var results []*ExecutionResult
+// Select returns the hooks of the given type.
+func Select(hooks []Hook, hookType HookType) []Hook {
+	var out []Hook
 	for _, h := range hooks {
 		if h.Type == hookType {
-			result := Execute(h, logFile, allowHooks)
-			results = append(results, result)
-
-			if !result.Success && hookType != OnError {
-				if result.Error != nil {
-					fmt.Fprintf(os.Stderr, "  hook %s/%s failed: %v\n", h.Layer, h.Type, result.Error)
-				}
-			}
+			out = append(out, h)
 		}
 	}
-	return results
+	return out
+}
+
+// ExecuteAll runs all hooks of a given type in order and stops at the first
+// failure. The caller decides whether hooks are allowed at all.
+func ExecuteAll(hooks []Hook, hookType HookType, opts Options) ([]*ExecutionResult, error) {
+	var results []*ExecutionResult
+	for _, h := range Select(hooks, hookType) {
+		r := Execute(h, opts)
+		results = append(results, r)
+		if !r.Success {
+			return results, fmt.Errorf("hook %s/%s failed: %v", h.Layer, h.Type, r.Error)
+		}
+	}
+	return results, nil
+}
+
+// Allowed reports whether hooks may run: only an explicit --allow-hooks or
+// DOTF_ALLOW_HOOKS=1 enables them. A repository cannot enable its own hooks.
+func Allowed(flag bool) bool {
+	return flag || os.Getenv("DOTF_ALLOW_HOOKS") == "1"
 }
 
 // hookTypeFromFilename determines the hook type from the filename.

@@ -61,33 +61,34 @@ func isContainer() bool {
 
 // isVM checks for indicators of virtualisation.
 func isVM() bool {
-	// Check DMI product name for common hypervisors
-	paths := []string{
-		"/sys/class/dmi/id/product_name",
-		"/sys/class/dmi/id/sys_vendor",
-		"/sys/devices/virtual/dmi/id/product_name",
+	read := func(name string) string {
+		data, err := os.ReadFile(filepath.Join(sysRoot, "class", "dmi", "id", name))
+		if err != nil {
+			return ""
+		}
+		return strings.ToLower(strings.TrimSpace(string(data)))
+	}
+	if isVMFromDMI(read("product_name"), read("sys_vendor")) {
+		return true
 	}
 
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		name := strings.ToLower(strings.TrimSpace(string(data)))
-		for _, vm := range []string{"virtualbox", "vmware", "qemu", "kvm", "bochs", "xen", "microsoft", "hyper-v", "parallels"} {
-			if strings.Contains(name, vm) {
+	// The CPU reports a hypervisor
+	cpuinfo, err := os.ReadFile("/proc/cpuinfo")
+	return err == nil && strings.Contains(string(cpuinfo), " hypervisor")
+}
+
+// isVMFromDMI decides from DMI strings (lowercased). Microsoft also makes
+// physical machines (Surface), so its vendor string alone is not enough:
+// Hyper-V guests report the product "Virtual Machine".
+func isVMFromDMI(product, vendor string) bool {
+	for _, s := range []string{product, vendor} {
+		for _, vm := range []string{"virtualbox", "vmware", "qemu", "kvm", "bochs", "xen", "parallels", "bhyve"} {
+			if strings.Contains(s, vm) {
 				return true
 			}
 		}
 	}
-
-	// Also check /proc/cpuinfo for hypervisor flag
-	cpuinfo, err := os.ReadFile("/proc/cpuinfo")
-	if err == nil && strings.Contains(strings.ToLower(string(cpuinfo)), "hypervisor") {
-		return true
-	}
-
-	return false
+	return strings.Contains(vendor, "microsoft") && strings.Contains(product, "virtual machine")
 }
 
 // hasBattery checks if the system has any power supply battery.

@@ -9,7 +9,7 @@ import (
 )
 
 func TestDoctorHelp(t *testing.T) {
-	err := Doctor([]string{"--help"}, t.TempDir())
+	err := Doctor([]string{"--help"}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Doctor --help returned error: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestDoctorRunsChecks(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := Doctor([]string{}, t.TempDir())
+	err := Doctor([]string{}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Doctor() failed: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestDoctorFixUnlock(t *testing.T) {
 	os.Stdout = w
 
 	// Use --unlock to release the stale lock
-	err := Doctor([]string{"--unlock"}, stateDir)
+	err := Doctor([]string{"--unlock"}, stateDir, OutputConfig{})
 	if err != nil {
 		t.Fatalf("Doctor --unlock failed: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestDoctorVerifyBackups(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := Doctor([]string{"--verify-backups"}, stateDir)
+	err := Doctor([]string{"--verify-backups"}, stateDir, OutputConfig{})
 	if err != nil {
 		t.Fatalf("Doctor --verify-backups failed: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestDoctorListHooks(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := Doctor([]string{"--list-hooks"}, t.TempDir())
+	err := Doctor([]string{"--list-hooks"}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Doctor --list-hooks failed: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestDoctorEmptyStateDir(t *testing.T) {
 	os.Stdout = w
 
 	// Fresh state dir should not cause errors
-	err := Doctor([]string{}, t.TempDir())
+	err := Doctor([]string{}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Doctor() with fresh state dir failed: %v", err)
 	}

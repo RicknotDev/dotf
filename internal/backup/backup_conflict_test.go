@@ -58,14 +58,13 @@ func TestConflictBrokenSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Backup a broken symlink - should detect it IS a symlink and skip
-	// The Lstat check in Create should catch this
+	// A broken symlink is still backed up (as a symlink)
 	b, err := m.Create("broken.lnk", linkPath)
 	if err != nil {
 		t.Fatalf("Create() failed for broken symlink: %v", err)
 	}
-	if b != nil {
-		t.Fatal("expected nil backup for broken symlink")
+	if b == nil || !b.Symlink {
+		t.Fatal("expected symlink backup for broken symlink")
 	}
 }
 
@@ -91,13 +90,20 @@ func TestConflictSymlinkToOtherLocation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Backup a symlink to another valid file - should detect it's a symlink and skip
+	// A foreign symlink is backed up so it can be restored later
 	b, err := m.Create(".gitconfig", linkPath)
 	if err != nil {
 		t.Fatalf("Create() failed for symlink to other location: %v", err)
 	}
-	if b != nil {
-		t.Fatal("expected nil backup for symlink to other location")
+	if b == nil {
+		t.Fatal("expected backup for symlink to other location")
+	}
+	restored := filepath.Join(dir, "restored")
+	if err := m.Restore(*b, restored); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.Readlink(restored); got != realFile {
+		t.Fatalf("restored link points to %q", got)
 	}
 }
 

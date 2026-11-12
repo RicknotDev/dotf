@@ -9,7 +9,7 @@ import (
 )
 
 func TestRestoreHelp(t *testing.T) {
-	err := Restore([]string{"--help"}, t.TempDir())
+	err := Restore([]string{"--help"}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Restore --help returned error: %v", err)
 	}
@@ -20,7 +20,7 @@ func TestRestorePreviewWithNoBackups(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := Restore([]string{"--preview"}, t.TempDir())
+	err := Restore([]string{"--preview"}, t.TempDir(), OutputConfig{})
 	if err != nil {
 		t.Fatalf("Restore --preview failed: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestRestorePreviewWithBackups(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := Restore([]string{"--preview"}, stateDir)
+	err := Restore([]string{"--preview"}, stateDir, OutputConfig{})
 	if err != nil {
 		t.Fatalf("Restore --preview with backups failed: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestRestoreDefaultBehavior(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := Restore([]string{}, stateDir)
+	err := Restore([]string{}, stateDir, OutputConfig{})
 	if err != nil {
 		t.Fatalf("Restore() with no args failed: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestRestoreSpecificFileNotFound(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	err := Restore([]string{"nonexistent"}, stateDir)
+	err := Restore([]string{"nonexistent"}, stateDir, OutputConfig{})
 	if err != nil {
 		// Restore may return an error or just print - either is acceptable
 		t.Logf("Restore nonexistent returned: %v", err)
@@ -128,7 +128,7 @@ func TestRestoreAllWithEmptyBackups(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := Restore([]string{"--all"}, stateDir)
+	err := Restore([]string{"--all"}, stateDir, OutputConfig{})
 	if err != nil {
 		t.Fatalf("Restore --all with no backups failed: %v", err)
 	}

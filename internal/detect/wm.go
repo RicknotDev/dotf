@@ -93,13 +93,26 @@ func detectWMByProcess() string {
 }
 
 // normalizeDesktop normalizes desktop environment / WM names.
+// XDG_CURRENT_DESKTOP is a colon-separated list ("ubuntu:GNOME",
+// "X-Cinnamon"); the first component with a known canonical name wins, so
+// "ubuntu:GNOME" is gnome rather than "ubuntu".
 func normalizeDesktop(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
-	name = strings.Split(name, ":")[0] // handle "gnome:gnome-classic" etc.
-	name = strings.Split(name, " ")[0]
+	parts := strings.Split(name, ":")
+	for _, part := range parts {
+		part = strings.TrimPrefix(strings.Split(strings.TrimSpace(part), " ")[0], "x-")
+		if canon := canonicalDesktop(part); canon != "" {
+			return canon
+		}
+	}
+	// If nothing matches, return the first raw name for extensibility
+	return strings.Split(strings.TrimSpace(parts[0]), " ")[0]
+}
 
-	// Map common names to their canonical forms
+func canonicalDesktop(name string) string {
 	switch {
+	case name == "":
+		return ""
 	case strings.Contains(name, "hyprland"):
 		return "hyprland"
 	case strings.Contains(name, "gnome"):
@@ -114,7 +127,7 @@ func normalizeDesktop(name string) string {
 		return "mate"
 	case strings.Contains(name, "sway"):
 		return "sway"
-	case strings.Contains(name, "i3"):
+	case name == "i3" || strings.HasPrefix(name, "i3-") || strings.HasPrefix(name, "i3wm"):
 		return "i3"
 	case strings.Contains(name, "bspwm"):
 		return "bspwm"
@@ -124,7 +137,7 @@ func normalizeDesktop(name string) string {
 		return "river"
 	case strings.Contains(name, "awesome"):
 		return "awesome"
-	case strings.Contains(name, "dwm"):
+	case name == "dwm":
 		return "dwm"
 	case strings.Contains(name, "budgie"):
 		return "budgie"
@@ -145,7 +158,5 @@ func normalizeDesktop(name string) string {
 	case strings.Contains(name, "lumina"):
 		return "lumina"
 	}
-
-	// If nothing matches, return the raw name for extensibility
-	return name
+	return ""
 }

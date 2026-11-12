@@ -13,8 +13,9 @@ func detectTerminal() string {
 		return normalizeTerminal(t)
 	}
 
-	// 2. TERM_PROGRAM (iTerm2, tmux, etc.)
-	if t := os.Getenv("TERM_PROGRAM"); t != "" {
+	// 2. TERM_PROGRAM, unless it names a multiplexer or an editor rather
+	// than the terminal emulator
+	if t := os.Getenv("TERM_PROGRAM"); t != "" && !notTerminals[strings.ToLower(t)] {
 		return normalizeTerminal(t)
 	}
 
@@ -29,6 +30,14 @@ func detectTerminal() string {
 	}
 
 	return ""
+}
+
+// notTerminals are TERM_PROGRAM values that are not terminal emulators.
+var notTerminals = map[string]bool{
+	"tmux":   true,
+	"screen": true,
+	"zellij": true,
+	"vscode": true,
 }
 
 // knownTerminals maps process names to canonical terminal names.

@@ -138,3 +138,52 @@ func TestMaxFilePath(t *testing.T) {
 		t.Fatal("expected unsafe for overlong path")
 	}
 }
+
+// Regression: as root, $HOME is /root, which is itself in the sensitive list.
+func TestValidateTargetPathRootHome(t *testing.T) {
+	result := ValidateTargetPath("/root", ".bashrc")
+	if !result.Safe {
+		t.Fatalf("root's own dotfiles must be installable: %s", result.Reason)
+	}
+	if result.Normalized != "/root/.bashrc" {
+		t.Fatalf("unexpected target %s", result.Normalized)
+	}
+}
+
+func TestValidateTargetPathAuthorizedKeys(t *testing.T) {
+	for _, home := range []string{"/root", "/home/user"} {
+		if ValidateTargetPath(home, ".ssh/authorized_keys").Safe {
+			t.Fatalf("authorized_keys under %s must be blocked", home)
+		}
+		if !ValidateTargetPath(home, ".ssh/config").Safe {
+			t.Fatalf(".ssh/config under %s should be allowed", home)
+		}
+	}
+}
+
+// Regression: "..foo" is an ordinary file name, not a parent reference.
+func TestValidateTargetPathDotDotPrefixName(t *testing.T) {
+	if !ValidateTargetPath("/home/user", "..hidden").Safe {
+		t.Fatal("file named ..hidden rejected")
+	}
+	if !ValidateTargetPath("/home/user", ".config/..x/y").Safe {
+		t.Fatal("directory named ..x rejected")
+	}
+	if ValidateTargetPath("/home/user", "..").Safe {
+		t.Fatal(".. accepted")
+	}
+	if ValidateTargetPath("/home/user", "/etc/passwd").Safe {
+		t.Fatal("absolute relative path accepted")
+	}
+}
+
+func TestValidateLayerFileDotDotPrefixName(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "..weird")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := ValidateLayerFile(dir, f); !r.Safe {
+		t.Fatalf("..weird rejected: %s", r.Reason)
+	}
+}

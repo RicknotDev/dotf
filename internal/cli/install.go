@@ -1,512 +1,547 @@
 package cli
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/RicknotDev/dotf/internal/backup"
-	"github.com/RicknotDev/dotf/internal/detect"
+	"github.com/RicknotDev/dotf/internal/deploy"
 	"github.com/RicknotDev/dotf/internal/hook"
 	"github.com/RicknotDev/dotf/internal/layer"
-	"github.com/RicknotDev/dotf/internal/lock"
 	"github.com/RicknotDev/dotf/internal/pkg"
 	"github.com/RicknotDev/dotf/internal/reorganize"
-	"github.com/RicknotDev/dotf/internal/safety"
-	"github.com/RicknotDev/dotf/internal/secret"
 	"github.com/RicknotDev/dotf/internal/state"
-	"github.com/RicknotDev/dotf/internal/transaction"
 )
 
-// Install runs the install command with full hardening.
-func Install(args []string, stateDir string) error {
-	fs := flag.NewFlagSet("install", flag.ContinueOnError)
-	dryRun := fs.Bool("dry-run", false, "Print what would be done without doing it")
-	copyMode := fs.Bool("copy", false, "Copy files instead of creating symlinks")
-	allowHooks := fs.Bool("allow-hooks", false, "Allow hook execution")
-	reorganizeFlag := fs.Bool("reorganize", false, "Reorganize flat dotfiles into layers/ structure before installing")
-	help := fs.Bool("help", false, "Show help")
+const installHelp = `Usage: dotf install [options] [path|git-url]
 
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	if *help {
-		fmt.Fprint(os.Stderr, `Usage: dotf install [options] [path]
-
-Install configured dotfiles to your home directory.
+Detect the environment, resolve the matching layers and install their files
+into your home directory.
 
 Arguments:
-  path          Path to dotfiles directory or git repository URL
-                (defaults to current directory)
+  path|git-url    Dotfiles repository (default: current directory). A git URL
+                  is cloned to the state directory and updated on later runs.
 
 Options:
-  --dry-run       Print what would be done without installing anything
-  --copy          Copy files instead of creating symlinks (useful for containers)
-  --allow-hooks   Enable hook script execution (disabled by default)
-  --reorganize    Reorganize flat dotfiles into layers/ structure before installing
-  --help          Show this help message
+  --dry-run         Show what would be done; write nothing, run nothing
+  --copy            Copy files instead of creating symlinks
+  --profile <name>  Use a profile from dotf.yaml
+  --allow-hooks     Run hook scripts (also DOTF_ALLOW_HOOKS=1)
+  --no-packages     Do not install packages from packages/<manager>.txt
+  --no-secrets      Do not deploy secrets from secrets/
+  --reorganize      Convert a flat dotfiles directory into layers/ first
+  --help            Show this help message
+`
 
-DOTF automatically detects your environment and resolves the matching
-configuration layers. No manual profile selection needed.
-`)
+// Install runs the install command.
+func Install(args []string, stateDir string, cfg OutputConfig) error {
+	fs := newFlagSet("install")
+	dryRun := fs.Bool("dry-run", false, "")
+	copyMode := fs.Bool("copy", false, "")
+	allowHooks := fs.Bool("allow-hooks", false, "")
+	noPackages := fs.Bool("no-packages", false, "")
+	noSecrets := fs.Bool("no-secrets", false, "")
+	reorganizeFlag := fs.Bool("reorganize", false, "")
+	profileName := fs.String("profile", "", "")
+	help := fs.Bool("help", false, "")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if *help {
+		fmt.Fprint(cfg.out(), installHelp)
 		return nil
 	}
+	if fs.NArg() > 1 {
+		return usageErr("install takes at most one path or URL")
+	}
 
-	// Determine repository root (default: current directory)
-	repoRoot, err := os.Getwd()
+	repoRoot, cleanup, err := resolveInstallSource(fs.Arg(0), stateDir, *dryRun, cfg)
 	if err != nil {
-		return fmt.Errorf("cannot determine working directory: %w", err)
+		return err
 	}
+	defer cleanup()
 
-	// Check for positional path argument (local path or git URL)
-	if remaining := fs.Args(); len(remaining) > 0 {
-		pathArg := remaining[0]
-		if strings.Contains(pathArg, "://") || strings.HasPrefix(pathArg, "git@") {
-			// Git URL — clone to persistent directory under stateDir
-			// (symlinks will point here, so it must not be deleted)
-			repoCache := filepath.Join(stateDir, "repos")
-			if err := os.MkdirAll(repoCache, 0755); err != nil {
-				return fmt.Errorf("cannot create repo cache directory: %w", err)
-			}
-			// Derive a directory name from the URL
-			repoName := strings.ReplaceAll(strings.ReplaceAll(pathArg, "/", "_"), ":", "_")
-			cloneDir := filepath.Join(repoCache, repoName)
-
-			// Clone if not already cached
-			if _, err := os.Stat(cloneDir); os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "Cloning %s...\n", pathArg)
-				args := []string{"clone", "--depth", "1", pathArg, cloneDir}
-				if err := runCmd("git", args...); err != nil {
-					return fmt.Errorf("cannot clone repository: %w", err)
-				}
-			} else {
-				fmt.Fprintf(os.Stderr, "Using cached clone: %s\n", cloneDir)
-			}
-			repoRoot = cloneDir
-		} else {
-			// Local path — resolve relative to current working directory
-			absPath, err := filepath.Abs(pathArg)
-			if err != nil {
-				return fmt.Errorf("cannot resolve path %s: %w", pathArg, err)
-			}
-			repoRoot = absPath
-		}
-	}
-
-	layersDir := filepath.Join(repoRoot, "layers")
-
-	// --- REORGANIZE ---
-	// Check if we need to reorganize a flat dotfiles structure into layers/
 	if reorganize.IsFlatStructure(repoRoot) {
-		if *reorganizeFlag {
-			fmt.Fprintln(os.Stderr, "Detected flat dotfiles structure. Reorganizing into layers/...")
+		if !*reorganizeFlag {
+			cfg.Info("Detected a flat dotfiles directory. Run with --reorganize to convert it to the layers/ format.\n")
+		} else {
 			result, err := reorganize.Analyze(repoRoot)
 			if err != nil {
 				return fmt.Errorf("cannot analyze structure: %w", err)
 			}
-			if !*dryRun {
+			if *dryRun {
+				cfg.Info("Would reorganize into layers/:\n%s", reorganize.FormatResult(result))
+				if !isRepo(repoRoot) {
+					cfg.Info("\nDry run complete. Run without --dry-run to reorganize and install.\n")
+					return nil
+				}
+			} else {
 				if err := reorganize.Reorganize(repoRoot, result); err != nil {
 					return fmt.Errorf("reorganization failed: %w", err)
 				}
-			}
-			fmt.Fprint(os.Stderr, reorganize.FormatResult(result))
-		} else {
-			fmt.Fprintln(os.Stderr, "Detected flat dotfiles structure. Run with --reorganize to auto-convert to DOTF layers/ format.")
-		}
-	}
-
-	// Validate we're in a DOTF repository
-	if _, err := os.Stat(layersDir); os.IsNotExist(err) {
-		return fmt.Errorf("not a DOTF repository: no 'layers' directory found in %s\n\nMake sure you run 'dotf install' from the root of your dotfiles repository, or use --reorganize to auto-convert a flat dotfiles directory", repoRoot)
-	}
-
-	// --- SIGNAL HANDLER ---
-	// Use a channel to signal abort without racing with the main goroutine
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
-	abort := make(chan struct{}, 1)
-	go func() {
-		select {
-		case sig := <-sigCh:
-			fmt.Fprintf(os.Stderr, "\nReceived %v. Aborting gracefully...\n", sig)
-			close(abort)
-		case <-abort:
-			// already aborted
-		}
-	}()
-
-	// --- LOCK ---
-	// Acquire lock to prevent concurrent operations
-	l, err := lock.Acquire(stateDir, 30*time.Second)
-	if err != nil {
-		return fmt.Errorf("cannot acquire lock: %w\n\n(Use 'dotf doctor --unlock' to release a stale lock)", err)
-	}
-	defer l.Release()
-
-	// --- TRANSACTION ---
-	// Start a transaction for atomicity
-	tx, err := transaction.New(stateDir)
-	if err != nil {
-		return fmt.Errorf("cannot start transaction: %w", err)
-	}
-
-	// Ensure rollback on failure
-	var installErr error
-	defer func() {
-		if installErr != nil {
-			fmt.Fprintln(os.Stderr, "\nInstallation failed. Rolling back...")
-			tx.Rollback()
-		}
-	}()
-
-	// --- DOTF.YAML ---
-	// If dotf.yaml doesn't exist, try to auto-generate it
-	dotfCfg, cfgErr := LoadDotfConfig(repoRoot)
-	if cfgErr == nil && dotfCfg == nil {
-		// No config file found — try to infer one
-		if inferred, inferErr := InferDotfConfig(repoRoot); inferErr == nil && inferred != nil {
-			if !*dryRun {
-				// Write the inferred config
-				cfgData := fmt.Sprintf("# DOTF configuration\n# Auto-generated by dotf install\nprofile: %s\nlayers:\n", inferred.Profile)
-				for _, l := range inferred.Layers {
-					cfgData += fmt.Sprintf("  - %s\n", l)
-				}
-				if writeErr := os.WriteFile(filepath.Join(repoRoot, "dotf.yaml"), []byte(cfgData), 0644); writeErr != nil {
-					fmt.Fprintf(os.Stderr, "warning: could not write dotf.yaml: %v\n", writeErr)
-				} else {
-					fmt.Fprintf(os.Stderr, "Generated dotf.yaml with %d layers\n", len(inferred.Layers))
-				}
+				cfg.Info("%s", reorganize.FormatResult(result))
 			}
 		}
-	} else if cfgErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: dotf.yaml: %v\n", cfgErr)
+	}
+	if !isRepo(repoRoot) {
+		return fmt.Errorf("not a DOTF repository: no 'layers' directory found in %s\n\nRun 'dotf install' from the root of your dotfiles repository, or use --reorganize to convert a flat dotfiles directory", repoRoot)
 	}
 
-	// --- DETECT ---
-	p := detect.Detect()
-	homeDir, err := os.UserHomeDir()
+	mode := deploy.Symlink
+	if *copyMode {
+		mode = deploy.Copy
+	}
+	return runDeploy(deployRequest{
+		cfg:         cfg,
+		stateDir:    stateDir,
+		repoRoot:    repoRoot,
+		profileFlag: *profileName,
+		mode:        mode,
+		dryRun:      *dryRun,
+		hooks:       hook.Allowed(*allowHooks),
+		packages:    !*noPackages,
+		noSecrets:   *noSecrets,
+		prune:       true,
+		command:     "install",
+	})
+}
+
+// resolveInstallSource returns the repository directory for a path or git
+// URL argument. Git URLs are cloned under <stateDir>/repos and pulled on
+// later runs; a dry run never touches the cache (it clones to a temporary
+// directory when needed).
+func resolveInstallSource(arg, stateDir string, dryRun bool, cfg OutputConfig) (string, func(), error) {
+	noop := func() {}
+	if arg == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", noop, fmt.Errorf("cannot determine working directory: %w", err)
+		}
+		return wd, noop, nil
+	}
+	if !isGitURL(arg) {
+		abs, err := filepath.Abs(arg)
+		if err != nil {
+			return "", noop, fmt.Errorf("cannot resolve path %s: %w", arg, err)
+		}
+		return abs, noop, nil
+	}
+
+	cloneDir := filepath.Join(stateDir, "repos", repoCacheName(arg))
+	_, statErr := os.Stat(cloneDir)
+	cached := statErr == nil
+	switch {
+	case cached && dryRun:
+		cfg.Info("Using cached clone %s (not updated in dry run)\n", cloneDir)
+		return cloneDir, noop, nil
+	case cached:
+		cfg.Info("Updating %s...\n", arg)
+		if err := runGit(cfg, "-C", cloneDir, "pull", "--ff-only"); err != nil {
+			return "", noop, fmt.Errorf("cannot update cached clone %s: %w", cloneDir, err)
+		}
+		return cloneDir, noop, nil
+	case dryRun:
+		tmp, err := os.MkdirTemp("", "dotf-dry-run-")
+		if err != nil {
+			return "", noop, err
+		}
+		cleanup := func() { os.RemoveAll(tmp) }
+		dir := filepath.Join(tmp, "repo")
+		cfg.Info("Cloning %s to a temporary directory...\n", arg)
+		if err := runGit(cfg, "clone", "--depth", "1", "--", arg, dir); err != nil {
+			cleanup()
+			return "", noop, fmt.Errorf("cannot clone repository: %w", err)
+		}
+		return dir, cleanup, nil
+	default:
+		if err := os.MkdirAll(filepath.Dir(cloneDir), 0o700); err != nil {
+			return "", noop, fmt.Errorf("cannot create repo cache directory: %w", err)
+		}
+		cfg.Info("Cloning %s...\n", arg)
+		if err := runGit(cfg, "clone", "--", arg, cloneDir); err != nil {
+			os.RemoveAll(cloneDir)
+			return "", noop, fmt.Errorf("cannot clone repository: %w", err)
+		}
+		return cloneDir, noop, nil
+	}
+}
+
+func isGitURL(s string) bool {
+	return strings.Contains(s, "://") || strings.HasPrefix(s, "git@")
+}
+
+var unsafeRepoChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+func repoCacheName(url string) string {
+	name := strings.Trim(unsafeRepoChars.ReplaceAllString(url, "_"), "_.")
+	if name == "" {
+		name = "repo"
+	}
+	return name
+}
+
+func runGit(cfg OutputConfig, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Stdout = cfg.InfoWriter()
+	cmd.Stderr = cfg.errw()
+	return cmd.Run()
+}
+
+// deployRequest is shared by install and apply.
+type deployRequest struct {
+	cfg           OutputConfig
+	stateDir      string
+	repoRoot      string
+	profileFlag   string
+	mode          deploy.Mode
+	dryRun        bool
+	hooks         bool
+	packages      bool
+	noSecrets     bool
+	prune         bool
+	noInteractive bool
+	command       string
+}
+
+// installReport is the JSON output of install and apply.
+type installReport struct {
+	Command  string            `json:"command"`
+	DryRun   bool              `json:"dry_run"`
+	Repo     string            `json:"repository"`
+	Profile  string            `json:"profile,omitempty"`
+	Detected map[string]string `json:"detected"`
+	Layers   []string          `json:"layers"`
+	Missing  []string          `json:"missing_layers,omitempty"`
+	Actions  []installAction   `json:"actions"`
+	Packages map[string]int    `json:"packages,omitempty"`
+	Summary  map[string]int    `json:"summary"`
+	Errors   []string          `json:"errors,omitempty"`
+}
+
+type installAction struct {
+	Path      string   `json:"path"`
+	Action    string   `json:"action"`
+	Layer     string   `json:"layer,omitempty"`
+	Kind      string   `json:"kind"`
+	Reason    string   `json:"reason,omitempty"`
+	Overrides []string `json:"overrides,omitempty"`
+}
+
+func runDeploy(req deployRequest) error {
+	cfg := req.cfg
+	home, err := homeDir()
 	if err != nil {
-		installErr = err
-		return fmt.Errorf("cannot determine home directory: %w", err)
+		return err
 	}
 
-	// Print detection
-	fmt.Fprintln(os.Stderr, "Detected:")
-	fmt.Fprintf(os.Stderr, "  distro:   %s\n", nonEmpty(p.Distro, "-"))
-	fmt.Fprintf(os.Stderr, "  session:  %s\n", nonEmpty(p.Session, "-"))
-	fmt.Fprintf(os.Stderr, "  wm:       %s\n", nonEmpty(p.WM, "-"))
-	fmt.Fprintf(os.Stderr, "  desktop:  %s\n", nonEmpty(p.DE, "-"))
-	fmt.Fprintf(os.Stderr, "  shell:    %s\n", nonEmpty(p.Shell, "-"))
-	fmt.Fprintf(os.Stderr, "  terminal: %s\n", nonEmpty(p.Terminal, "-"))
-	fmt.Fprintf(os.Stderr, "  gpu:      %s\n", nonEmpty(p.GPU, "-"))
-	fmt.Fprintf(os.Stderr, "  hostname: %s\n", nonEmpty(p.Hostname, "-"))
-	fmt.Fprintf(os.Stderr, "  device:   %s\n", nonEmpty(p.DeviceType, "-"))
-
-	// --- RESOLVE LAYERS ---
-	result, err := layer.Resolve(repoRoot, p)
+	sel, err := selectLayers(req.repoRoot, req.profileFlag)
 	if err != nil {
-		installErr = err
-		return fmt.Errorf("resolving layers: %w", err)
+		return err
+	}
+	for _, w := range sel.Warnings {
+		cfg.Warn("%s", w)
+	}
+	detected := profileFields(sel)
+	cfg.Info("Detected:\n")
+	for _, k := range profileFieldOrder {
+		cfg.Info("  %-9s %s\n", k+":", nonEmpty(detected[k], "-"))
+	}
+	if sel.ProfileName != "" {
+		cfg.Info("  profile:  %s\n", sel.ProfileName)
 	}
 
+	result := sel.Result
 	if len(result.Layers) == 0 {
-		fmt.Fprintln(os.Stderr, "\nNo layers found for the detected environment.")
-		fmt.Fprintln(os.Stderr, "Create layer directories under 'layers/' to add support.")
-		return nil
+		return nothingToDo("nothing to do: no layers found for the detected environment")
 	}
-
-	fmt.Fprintf(os.Stderr, "\nActive layers (%d):\n", len(result.Layers))
+	cfg.Info("\nActive layers (%d):\n", len(result.Layers))
 	for _, l := range result.Layers {
-		fmt.Fprintf(os.Stderr, "  - %s\n", l.Path())
+		cfg.Info("  - %s\n", l.Path())
 	}
-
 	if len(result.Missing) > 0 {
-		fmt.Fprintf(os.Stderr, "\nUnavailable layers (not found in repo):\n")
-		for _, l := range result.Missing {
-			fmt.Fprintf(os.Stderr, "  - %s (layer directory not found)\n", l.Path())
-		}
+		cfg.Info("Layers not in the repository: %s\n", strings.Join(missingPaths(result), ", "))
 	}
 
-	// --- PRE-INSTALL HOOKS ---
 	layerDirs := make([]string, len(result.Layers))
 	for i, l := range result.Layers {
 		layerDirs[i] = l.DirPath
 	}
-	hooks := hook.DiscoverHooks(layerDirs)
-	hookLogFile := filepath.Join(stateDir, "hooks.log")
-	hookResults := hook.ExecuteAll(hooks, hook.PreInstall, hookLogFile, *allowHooks)
-	for _, hr := range hookResults {
-		if !hr.Success {
-			fmt.Fprintf(os.Stderr, "  hook %s/%s: %s\n", hr.Hook.Layer, hr.Hook.Type, hr.Output)
-		}
-	}
 
-	fmt.Fprintln(os.Stderr)
-
-	// --- STATE ---
-	sm, err := state.NewManager(stateDir)
+	sm, err := state.NewManager(req.stateDir)
 	if err != nil {
-		installErr = err
-		return fmt.Errorf("cannot initialize state: %w", err)
+		return err
 	}
-
-	// --- BACKUP ---
-	backupMgr, err := backup.NewManager(filepath.Join(stateDir, "backups"))
+	bm, err := backup.NewManager(filepath.Join(req.stateDir, "backups"))
 	if err != nil {
-		installErr = err
-		return fmt.Errorf("cannot initialize backups: %w", err)
+		return err
+	}
+	opts := deploy.Options{
+		RepoRoot:  req.repoRoot,
+		HomeDir:   home,
+		StateDir:  req.stateDir,
+		Layers:    result.Layers,
+		Mode:      req.mode,
+		NoSecrets: req.noSecrets,
+		Prune:     req.prune,
+		Log:       cfg.InfoWriter(),
 	}
 
-	// --- PACKAGES ---
-	pm := pkg.DetectManager()
-	if pm != nil {
-		pkgFiles := pkg.FindPackageFiles(layersDir, getLayerPaths(result.Layers))
-		if len(pkgFiles) > 0 {
-			fmt.Fprintf(os.Stderr, "Package manager: %s\n", pm.Name())
-			for _, pf := range pkgFiles {
-				pkgs, err := pkg.LoadPackages(pf)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "  cannot read %s: %v\n", pf, err)
-					continue
-				}
-				if len(pkgs) > 0 {
-					fmt.Fprintf(os.Stderr, "  packages from %s: %d\n", filepath.Base(pf), len(pkgs))
-					if !*dryRun {
-						fmt.Fprintf(os.Stderr, "  installing... ")
-						if err := pm.Install(pkgs); err != nil {
-							fmt.Fprintf(os.Stderr, "error: %v\n", err)
-						} else {
-							fmt.Fprintln(os.Stderr, "done")
-						}
-					}
-				}
+	report := installReport{
+		Command:  req.command,
+		DryRun:   req.dryRun,
+		Repo:     req.repoRoot,
+		Profile:  sel.ProfileName,
+		Detected: detected,
+		Layers:   getLayerPaths(result.Layers),
+		Missing:  missingPaths(result),
+		Actions:  []installAction{},
+		Summary:  map[string]int{},
+	}
+
+	// Hooks only run for install; apply only deploys files.
+	var hooks []hook.Hook
+	if req.command == "install" {
+		hooks = hook.DiscoverHooks(layerDirs)
+	}
+	hookOpts := hook.Options{
+		RepoRoot: req.repoRoot,
+		HomeDir:  home,
+		Profile:  sel.ProfileName,
+		LogFile:  filepath.Join(req.stateDir, "hooks.log"),
+	}
+	if len(hooks) > 0 && !req.hooks {
+		cfg.Info("\n%s skipped (use --allow-hooks or DOTF_ALLOW_HOOKS=1 to run them)\n", plural(len(hooks), "hook"))
+		hooks = nil
+	}
+	var pm *pkg.Manager
+	var pkgLists map[string][]string
+	if req.packages {
+		pm, pkgLists, err = loadPackageLists(cfg, layerDirs)
+		if err != nil {
+			return err
+		}
+		if len(pkgLists) > 0 {
+			report.Packages = map[string]int{}
+			for f, list := range pkgLists {
+				report.Packages[f] = len(list)
 			}
-			fmt.Fprintln(os.Stderr)
 		}
 	}
 
-	// --- SECRETS ---
-	secrets := secret.DiscoverSecrets(layersDir, getLayerPaths(result.Layers))
-	if len(secrets) > 0 {
-		fmt.Fprintf(os.Stderr, "Secrets found: %d\n", len(secrets))
-		for _, s := range secrets {
-			fmt.Fprintf(os.Stderr, "  %s (%s)\n", s.Name, s.Method)
+	if req.dryRun {
+		plan, err := deploy.BuildPlan(opts, sm)
+		if err != nil {
+			return err
 		}
-		if !*dryRun {
-			for _, s := range secrets {
-				if err := secret.Decrypt(&s); err != nil {
-					fmt.Fprintf(os.Stderr, "  cannot decrypt %s: %v\n", s.Name, err)
-					continue
-				}
-				fmt.Fprintf(os.Stderr, "  decrypted %s\n", s.Name)
-				// Destroy each secret immediately after decryption display
-				// (not deferred — defer in a loop would accumulate all destroys until function return)
-				if err := secret.Destroy(&s); err != nil {
-					fmt.Fprintf(os.Stderr, "  warning: cannot destroy %s: %v\n", s.Name, err)
-				}
-			}
+		cfg.Info("\nPlan:\n")
+		printPlan(cfg, plan)
+		for _, h := range hooks {
+			cfg.Info("  would run hook %s/%s\n", h.Layer, h.Type)
 		}
-		fmt.Fprintln(os.Stderr)
+		for f, list := range pkgLists {
+			cfg.Info("  would install %s with %s from %s\n", plural(len(list), "package"), pm.Name(), f)
+		}
+		for _, it := range plan.Items {
+			report.Actions = append(report.Actions, actionOf(it))
+			report.Summary[string(it.Action)]++
+		}
+		if cfg.JSON {
+			cfg.PrintJSON(report)
+		}
+		cfg.Info("\nDry run complete. Nothing was changed. Run 'dotf %s' without --dry-run to apply.\n", req.command)
+		if req.noInteractive && len(plan.Conflicts()) > 0 {
+			return conflictErr("conflict: %s would be replaced (existing files not managed by dotf)", plural(len(plan.Conflicts()), "file"))
+		}
+		return nil
 	}
 
-	// --- INSTALL FILES ---
-	installed := make(map[string]string) // relative path -> layer path
-	stats := &installStats{}
-
-	// Determine install mode
-	mode := layer.InstallSymlink
-	if *copyMode {
-		mode = layer.InstallCopy
+	sess, err := startSession(req.stateDir, cfg)
+	if err != nil {
+		return err
 	}
-	if *dryRun {
-		mode = layer.InstallDryRun
+	defer sess.end()
+	opts.Abort = sess.abort
+
+	// Re-read the state: recovering an interrupted run may have changed it.
+	if sm, err = state.NewManager(req.stateDir); err != nil {
+		return err
 	}
-
-walkLayers:
-	for _, l := range result.Layers {
-		walkErr := filepath.WalkDir(l.DirPath, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return err
+	plan, err := deploy.BuildPlan(opts, sm)
+	if err != nil {
+		return err
+	}
+	if req.noInteractive {
+		if c := plan.Conflicts(); len(c) > 0 {
+			for _, it := range c {
+				cfg.PrintErr("  conflict: %s already exists\n", it.Rel)
 			}
-			if d.IsDir() {
-				return nil
-			}
-
-			rel, walkRelErr := filepath.Rel(l.DirPath, path)
-			if walkRelErr != nil {
-				return walkRelErr
-			}
-
-			// --- SAFETY CHECKS ---
-			// Validate the source file within the repository
-			sourceResult := safety.ValidateLayerFile(repoRoot, path)
-			if !sourceResult.Safe {
-				stats.Errors = append(stats.Errors, fmt.Sprintf("safety: %s: %s", rel, sourceResult.Reason))
-				return nil // skip unsafe files
-			}
-
-			// Validate the target path within home directory
-			targetResult := safety.ValidateTargetPath(homeDir, rel)
-			if !targetResult.Safe {
-				stats.Errors = append(stats.Errors, fmt.Sprintf("safety: %s: %s", rel, targetResult.Reason))
-				return nil // skip unsafe targets
-			}
-			targetPath := targetResult.Normalized
-
-			// Check if already installed by a lower-priority layer
-			alreadyInstalled := false
-			if _, exists := installed[rel]; exists {
-				alreadyInstalled = true
-				if mode == layer.InstallDryRun {
-					fmt.Fprintf(os.Stderr, "  override %s <- %s (was %s)\n", rel, l.Path(), installed[rel])
-				}
-			}
-
-			targetDir := filepath.Dir(targetPath)
-
-			if mode == layer.InstallDryRun {
-				if !alreadyInstalled {
-					fmt.Fprintf(os.Stderr, "  create  %s <- %s\n", rel, l.Path())
-				}
-				installed[rel] = l.Path()
-				return nil
-			}
-
-			// --- BACKUP ---
-			// Check if target exists and needs backup
-			if _, statErr := os.Lstat(targetPath); statErr == nil && !alreadyInstalled {
-				// Only back up if it's not already our symlink
-				if !isSymlink(targetPath) {
-					b, bErr := backupMgr.Create(rel, targetPath)
-					if bErr != nil {
-						stats.Errors = append(stats.Errors, fmt.Sprintf("backup %s: %v", rel, bErr))
-						return nil
-					}
-					if b != nil {
-						stats.BackedUp++
-						fmt.Fprintf(os.Stderr, "  backed up %s\n", rel)
-						sm.RecordBackup(b.BackupPath, rel)
-					}
-				}
-			}
-
-			// Ensure target directory exists
-			if err := os.MkdirAll(targetDir, 0755); err != nil {
-				stats.Errors = append(stats.Errors, fmt.Sprintf("mkdir %s: %v", targetDir, err))
-				return nil
-			}
-
-			// Check for abort signal before each operation
-			select {
-			case <-abort:
-				installErr = fmt.Errorf("aborted by signal")
-				return filepath.SkipAll
-			default:
-			}
-
-			// --- INSTALL ---
-			var installError error
-			if mode == layer.InstallSymlink {
-				// Remove existing file/symlink if present
-				if _, statErr := os.Lstat(targetPath); statErr == nil {
-					if err := os.Remove(targetPath); err != nil {
-						stats.Errors = append(stats.Errors, fmt.Sprintf("remove %s: %v", rel, err))
-						return err // abort walk on error
-					}
-				}
-				// Use transaction for atomic symlink creation
-				installError = tx.Symlink(path, targetPath)
-			} else {
-				// Use transaction for atomic file copy
-				installError = tx.Copy(path, targetPath)
-			}
-
-			if installError != nil {
-				stats.Errors = append(stats.Errors, fmt.Sprintf("install %s: %v", rel, installError))
-				installErr = fmt.Errorf("install %s: %w", rel, installError) // signal rollback
-				return filepath.SkipAll                                      // abort the walk
-			}
-
-			stats.Created++
-			installed[rel] = l.Path()
-
-			// Record in state
-			fileType := "symlink"
-			if mode == layer.InstallCopy {
-				fileType = "copy"
-			}
-			sm.RecordFile(rel, l.Path(), fileType, path)
-
-			return nil
-		})
-		if walkErr != nil && installErr == nil {
-			// Walk encountered an error but installErr wasn't set
-			installErr = walkErr
-		}
-		if installErr != nil {
-			break walkLayers // stop processing remaining layers
+			return conflictErr("conflict: %s already exist (aborting due to --no-interactive)", plural(len(c), "file"))
 		}
 	}
 
-	if installErr != nil {
-		// Rollback will happen via the deferred function
-		// Return the error after printing what we did manage
-		if stats.Created > 0 {
-			fmt.Fprintf(os.Stderr, "  installed %d files before failure\n", stats.Created)
-		}
-		return installErr
+	if _, err := hook.ExecuteAll(hooks, hook.PreInstall, hookOpts); err != nil {
+		return fmt.Errorf("%w; nothing was installed", err)
 	}
 
-	// --- POST-INSTALL HOOKS ---
-	hookResults = hook.ExecuteAll(hooks, hook.PostInstall, hookLogFile, *allowHooks)
-	for _, hr := range hookResults {
-		if !hr.Success {
-			fmt.Fprintf(os.Stderr, "  hook %s/%s: %s\n", hr.Hook.Layer, hr.Hook.Type, hr.Output)
+	for f, list := range pkgLists {
+		cfg.Info("\nInstalling %s with %s from %s...\n", plural(len(list), "package"), pm.Name(), f)
+		if err := pm.Install(list); err != nil {
+			return fmt.Errorf("package installation from %s failed: %w", f, err)
 		}
 	}
 
-	// --- COMMIT ---
-	// Record install in state
-	layerNames := make([]string, len(result.Layers))
-	for i, l := range result.Layers {
-		layerNames[i] = l.Path()
+	if len(plan.Items) > 0 {
+		cfg.Info("\n")
 	}
-	sm.RecordInstall(layerNames)
+	res, err := deploy.Execute(opts, plan, sm, bm)
+	if err != nil {
+		hook.ExecuteAll(hooks, hook.OnError, hookOpts)
+		return err
+	}
 
+	sm.SetRepository(req.repoRoot)
+	sm.RecordInstall(getLayerPaths(result.Layers))
 	if err := sm.Save(); err != nil {
-		installErr = err
-		return fmt.Errorf("cannot save state: %w", err)
+		return fmt.Errorf("files installed but the state could not be saved: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		installErr = err
-		return fmt.Errorf("cannot commit transaction: %w", err)
+	_, hookErr := hook.ExecuteAll(hooks, hook.PostInstall, hookOpts)
+
+	for _, it := range plan.Items {
+		report.Actions = append(report.Actions, actionOf(it))
+	}
+	report.Summary = map[string]int{
+		"created":   res.Created,
+		"replaced":  res.Replaced,
+		"updated":   res.Updated,
+		"unchanged": res.Unchanged,
+		"removed":   res.Removed,
+		"backed_up": res.BackedUp,
+		"errors":    len(res.Errors),
+	}
+	report.Errors = res.Errors
+	if cfg.JSON {
+		cfg.PrintJSON(report)
 	}
 
-	if mode == layer.InstallDryRun {
-		fmt.Fprintf(os.Stderr, "Dry run complete. Use 'dotf install' (without --dry-run) to apply.\n")
-	} else {
-		fmt.Fprintf(os.Stderr, "\nDone: %s\n", stats.String())
-	}
+	summary := joinNonEmpty([]string{
+		countPart(res.Created, "created"),
+		countPart(res.Replaced, "replaced"),
+		countPart(res.Updated, "updated"),
+		countPart(res.Removed, "removed"),
+		countPart(res.BackedUp, "backed up"),
+		countPart(res.Unchanged, "unchanged"),
+	}, ", ")
+	cfg.Info("\nDone: %s\n", nonEmpty(summary, "nothing to change"))
 
-	// Error summary
-	if len(stats.Errors) > 0 {
-		fmt.Fprintf(os.Stderr, "\nErrors (%d):\n", len(stats.Errors))
-		for _, e := range stats.Errors {
-			fmt.Fprintf(os.Stderr, "  %s\n", e)
+	if len(res.Errors) > 0 {
+		for _, e := range res.Errors {
+			cfg.PrintErr("  error: %s\n", e)
+		}
+		return fmt.Errorf("%s could not be installed", plural(len(res.Errors), "file"))
+	}
+	return hookErr
+}
+
+var profileFieldOrder = []string{"distro", "session", "wm", "desktop", "shell", "terminal", "gpu", "hostname", "device"}
+
+func profileFields(sel *selection) map[string]string {
+	p := sel.Profile
+	return map[string]string{
+		"distro":   p.Distro,
+		"session":  p.Session,
+		"wm":       p.WM,
+		"desktop":  p.DE,
+		"shell":    p.Shell,
+		"terminal": p.Terminal,
+		"gpu":      p.GPU,
+		"hostname": p.Hostname,
+		"device":   p.DeviceType,
+	}
+}
+
+func countPart(n int, word string) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d %s", n, word)
+}
+
+func missingPaths(r *layer.ResolveResult) []string {
+	var out []string
+	for _, l := range r.Missing {
+		out = append(out, l.Path())
+	}
+	return out
+}
+
+func actionOf(it deploy.Item) installAction {
+	return installAction{
+		Path:      it.Rel,
+		Action:    string(it.Action),
+		Layer:     it.Layer,
+		Kind:      string(it.Kind),
+		Reason:    it.Reason,
+		Overrides: it.Overridden,
+	}
+}
+
+func printPlan(cfg OutputConfig, plan *deploy.Plan) {
+	for _, it := range plan.Items {
+		if it.Action == deploy.ActUnchanged {
+			continue
+		}
+		line := fmt.Sprintf("  %-9s %s", it.Action, it.Rel)
+		if it.Layer != "" && it.Action != deploy.ActRemove {
+			line += " <- " + it.Layer
+		}
+		if it.Kind == deploy.KindSecret {
+			line += " (secret)"
+		}
+		if len(it.Overridden) > 0 {
+			line += " (overrides " + strings.Join(it.Overridden, ", ") + ")"
+		}
+		if it.Action == deploy.ActReplace {
+			line += " (existing file will be backed up)"
+		}
+		if it.Reason != "" {
+			line += ": " + it.Reason
+		}
+		cfg.Info("%s\n", line)
+	}
+	if n := plan.Count(deploy.ActUnchanged); n > 0 {
+		cfg.Info("  %s already up to date\n", plural(n, "file"))
+	}
+	if len(plan.Items) == 0 {
+		cfg.Info("  (no files)\n")
+	}
+}
+
+// loadPackageLists reads the package lists meant for the detected manager.
+func loadPackageLists(cfg OutputConfig, layerDirs []string) (*pkg.Manager, map[string][]string, error) {
+	pm := pkg.DetectManager()
+	if pm == nil {
+		return nil, nil, nil
+	}
+	used, ignored := pm.ListFiles(layerDirs)
+	for _, f := range ignored {
+		cfg.Info("Ignoring %s (not a package list for %s)\n", f, pm.Name())
+	}
+	lists := map[string][]string{}
+	for _, f := range used {
+		pkgs, err := pkg.LoadPackages(f)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(pkgs) > 0 {
+			lists[f] = pkgs
 		}
 	}
-
-	return nil
+	return pm, lists, nil
 }
 
 // getLayerPaths extracts layer path strings from resolved layers.
@@ -516,48 +551,4 @@ func getLayerPaths(layers []layer.ResolvedLayer) []string {
 		paths[i] = l.Path()
 	}
 	return paths
-}
-
-// installStats contains counts from an install operation.
-type installStats struct {
-	Created  int
-	BackedUp int
-	Errors   []string
-}
-
-func (s *installStats) String() string {
-	var parts []string
-	parts = append(parts, fmt.Sprintf("%d created", s.Created))
-	if s.BackedUp > 0 {
-		parts = append(parts, fmt.Sprintf("%d backed up", s.BackedUp))
-	}
-	if len(s.Errors) > 0 {
-		parts = append(parts, fmt.Sprintf("%d errors", len(s.Errors)))
-	}
-	return strings.Join(parts, ", ")
-}
-
-// nonEmpty returns the string value or a fallback if empty.
-func nonEmpty(s, fallback string) string {
-	if s == "" {
-		return fallback
-	}
-	return s
-}
-
-// isSymlink checks if a path is a symbolic link.
-func isSymlink(path string) bool {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeSymlink != 0
-}
-
-// runCmd runs a command with output to stderr.
-func runCmd(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
 }

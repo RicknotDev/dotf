@@ -1,181 +1,252 @@
 package cli
 
 import (
-	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-	"time"
 
 	"github.com/RicknotDev/dotf/internal/backup"
-	"github.com/RicknotDev/dotf/internal/lock"
+	"github.com/RicknotDev/dotf/internal/safety"
+	"github.com/RicknotDev/dotf/internal/state"
 	"github.com/RicknotDev/dotf/internal/transaction"
 )
 
-// Restore runs the restore command.
-func Restore(args []string, stateDir string) error {
-	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
-	all := fs.Bool("all", false, "Restore all backed-up files")
-	preview := fs.Bool("preview", false, "Show what would be restored")
-	help := fs.Bool("help", false, "Show help")
+const restoreHelp = `Usage: dotf restore [options] [path...]
 
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	if *help {
-		fmt.Fprint(os.Stderr, `Usage: dotf restore [options] [path...]
-
-Restore files from DOTF backups to their original locations.
+Restore files from DOTF backups to their original locations (relative to
+your home directory). The newest backup of each file is used.
 
 Options:
-  --all        Restore all backed-up files
-  --preview    Show what would be restored without doing it
+  --all        Restore every backed-up file
+  --preview    Show what is available without restoring anything
   --help       Show this help message
 
 Examples:
-  dotf restore --preview              # Show all available restores
-  dotf restore --all                  # Restore everything
-  dotf restore .config/kitty/kitty.conf  # Restore a specific file
-`)
+  dotf restore                           # Same as --preview
+  dotf restore --all                     # Restore everything
+  dotf restore .config/kitty/kitty.conf  # Restore one file
+`
+
+type restorePreview struct {
+	Path    string          `json:"path"`
+	Backups []restoreBackup `json:"backups"`
+}
+
+type restoreBackup struct {
+	File    string `json:"file"`
+	Created string `json:"created"`
+	Valid   bool   `json:"valid"`
+	Symlink bool   `json:"symlink,omitempty"`
+}
+
+// Restore runs the restore command.
+func Restore(args []string, stateDir string, cfg OutputConfig) error {
+	fs := newFlagSet("restore")
+	all := fs.Bool("all", false, "")
+	preview := fs.Bool("preview", false, "")
+	help := fs.Bool("help", false, "")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if *help {
+		fmt.Fprint(cfg.out(), restoreHelp)
 		return nil
-	}
-
-	// Acquire lock for safety
-	l, err := lock.Acquire(stateDir, 30*time.Second)
-	if err != nil {
-		return fmt.Errorf("cannot acquire lock: %w", err)
-	}
-	defer l.Release()
-
-	// Start transaction for atomicity
-	tx, err := transaction.New(stateDir)
-	if err != nil {
-		return fmt.Errorf("cannot start transaction: %w", err)
-	}
-
-	// Ensure rollback on failure
-	var restoreErr error
-	defer func() {
-		if restoreErr != nil {
-			fmt.Fprintln(os.Stderr, "Restore failed. Rolling back...")
-			tx.Rollback()
-		} else {
-			if commitErr := tx.Commit(); commitErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: transaction commit failed: %v\n", commitErr)
-			}
-		}
-	}()
-
-	backupMgr, err := backup.NewManager(filepath.Join(stateDir, "backups"))
-	if err != nil {
-		return fmt.Errorf("cannot open backups: %w", err)
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("cannot determine home directory: %w", err)
 	}
 	paths := fs.Args()
-
-	if len(paths) == 0 && !*all {
-		// Preview mode: show all available backups
-		*preview = true
+	if *all && len(paths) > 0 {
+		return usageErr("use either --all or a list of paths")
 	}
 
-	if *preview {
-		fmt.Println("Available restores:")
-		fmt.Println()
+	bm, err := backup.NewManager(filepath.Join(stateDir, "backups"))
+	if err != nil {
+		return err
+	}
+	if *preview || (!*all && len(paths) == 0) {
+		return restorePreviewCmd(cfg, bm, paths)
+	}
 
-		allBackups, err := backupMgr.ListAll()
-		if err != nil {
-			return fmt.Errorf("cannot list backups: %w", err)
+	home, err := homeDir()
+	if err != nil {
+		return err
+	}
+	sess, err := startSession(stateDir, cfg)
+	if err != nil {
+		return err
+	}
+	defer sess.end()
+
+	groups, err := bm.ListAll()
+	if err != nil {
+		return err
+	}
+	if *all {
+		for p := range groups {
+			paths = append(paths, p)
 		}
-
-		if len(allBackups) == 0 {
-			fmt.Println("  (no backups found)")
+		sort.Strings(paths)
+		if len(paths) == 0 {
+			cfg.Print("No backups found. Restored 0 files.")
 			return nil
 		}
-
-		for original, backups := range allBackups {
-			if len(paths) > 0 && !matchAny(original, paths) {
-				continue
-			}
-			fmt.Printf("  %s:\n", original)
-			for _, b := range backups {
-				valid, _ := backupMgr.Verify(b)
-				status := "✓"
-				if !valid {
-					status = "✗ CORRUPTED"
-				}
-				fmt.Printf("    [%s] %s %s\n", b.Created, status, filepath.Base(b.BackupPath))
-			}
-		}
-		return nil
 	}
 
-	if *all {
-		// Restore all
-		allBackups, err := backupMgr.ListAll()
-		if err != nil {
-			return fmt.Errorf("cannot list backups: %w", err)
+	sm, err := state.NewManager(stateDir)
+	if err != nil {
+		return err
+	}
+	tx, err := transaction.New(stateDir)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return fmt.Errorf("%w; rollback incomplete (run 'dotf doctor --fix'): %v", err, rbErr)
 		}
-
-		restored := 0
-		for original, backups := range allBackups {
-			if len(backups) == 0 {
-				continue
-			}
-			// Restore from the most recent backup
-			b := backups[0]
-			targetPath := filepath.Join(homeDir, original)
-
-			fmt.Fprintf(os.Stderr, "  restore %s\n", original)
-			if err := backupMgr.Restore(b, targetPath); err != nil {
-				restoreErr = err
-				fmt.Fprintf(os.Stderr, "  error: %v\n", err)
-				continue
-			}
-			restored++
-		}
-
-		fmt.Fprintf(os.Stderr, "\nRestored %d files.\n", restored)
-		if restoreErr != nil {
-			return fmt.Errorf("some restores failed: %w", restoreErr)
-		}
-		return nil
+		return fmt.Errorf("%w (nothing was restored)", err)
 	}
 
-	// Restore specific files
-	restored := 0
+	var restored []string
 	for _, p := range paths {
-		backups, err := backupMgr.List(p)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  no backups for %s\n", p)
-			continue
+		select {
+		case <-sess.abort:
+			return fail(fmt.Errorf("aborted by signal"))
+		default:
 		}
+		rel := filepath.ToSlash(filepath.Clean(p))
+		backups := groups[rel]
 		if len(backups) == 0 {
-			fmt.Fprintf(os.Stderr, "  no backups for %s\n", p)
-			continue
+			return fail(fmt.Errorf("no backup of %s", rel))
+		}
+		tgt := safety.ValidateTargetPath(home, rel)
+		if !tgt.Safe {
+			return fail(fmt.Errorf("%s: %s", rel, tgt.Reason))
+		}
+		content, err := bm.Open(backups[0])
+		if err != nil {
+			return fail(fmt.Errorf("%s: %w", rel, err))
+		}
+		// Read it now: backing up the current file below may prune old backups.
+		var data []byte
+		if content.LinkTarget == "" {
+			r, err := content.Open()
+			if err != nil {
+				return fail(fmt.Errorf("%s: %w", rel, err))
+			}
+			data, err = io.ReadAll(r)
+			r.Close()
+			if err != nil {
+				return fail(fmt.Errorf("%s: %w", rel, err))
+			}
 		}
 
-		b := backups[0]
-		targetPath := filepath.Join(homeDir, p)
-		fmt.Fprintf(os.Stderr, "  restore %s\n", p)
-		if err := backupMgr.Restore(b, targetPath); err != nil {
-			fmt.Fprintf(os.Stderr, "  error: %v\n", err)
-			restoreErr = err
-			continue
+		// Keep whatever is there now if dotf does not own it.
+		ref, managed := sm.File(rel)
+		if _, err := os.Lstat(tgt.Normalized); err == nil && !(managed && ownedBy(tgt.Normalized, ref)) {
+			if b, err := bm.Create(rel, tgt.Normalized); err != nil {
+				return fail(fmt.Errorf("cannot back up current %s: %w", rel, err))
+			} else if b != nil {
+				sm.RecordBackup(b.BackupPath, rel)
+			}
 		}
-		restored++
+
+		if err := tx.MkdirAll(filepath.Dir(tgt.Normalized), 0o755); err != nil {
+			return fail(err)
+		}
+		if content.LinkTarget != "" {
+			err = tx.Symlink(content.LinkTarget, tgt.Normalized)
+		} else {
+			err = tx.WriteFile(tgt.Normalized, content.Mode, func(w io.Writer) error {
+				_, err := w.Write(data)
+				return err
+			})
+		}
+		if err != nil {
+			return fail(fmt.Errorf("restore %s: %w", rel, err))
+		}
+		sm.RemoveFile(rel) // restored files are no longer managed by dotf
+		restored = append(restored, rel)
+		cfg.Info("  restore %s (backup from %s)\n", rel, backups[0].Time.Format("2006-01-02 15:04:05"))
 	}
 
-	fmt.Fprintf(os.Stderr, "Restored %d files.\n", restored)
+	if err := tx.Commit(); err != nil {
+		return fail(err)
+	}
+	if err := sm.Save(); err != nil {
+		return fmt.Errorf("files restored but the state could not be saved: %w", err)
+	}
+	if cfg.JSON {
+		cfg.PrintJSON(map[string]interface{}{"restored": restored})
+		return nil
+	}
+	cfg.Print(fmt.Sprintf("Restored %s.", plural(len(restored), "file")))
 	return nil
 }
 
-// matchAny checks if a string matches any of the provided patterns.
+func restorePreviewCmd(cfg OutputConfig, bm *backup.Manager, filter []string) error {
+	groups, err := bm.ListAll()
+	if err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(groups))
+	for k := range groups {
+		if len(filter) == 0 || matchAny(k, filter) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+
+	if cfg.JSON {
+		out := []restorePreview{}
+		for _, k := range keys {
+			pr := restorePreview{Path: k}
+			for _, b := range groups[k] {
+				ok, _ := bm.Verify(b)
+				pr.Backups = append(pr.Backups, restoreBackup{
+					File:    b.BackupPath,
+					Created: b.Time.Format("2006-01-02T15:04:05Z07:00"),
+					Valid:   ok,
+					Symlink: b.Symlink,
+				})
+			}
+			out = append(out, pr)
+		}
+		cfg.PrintJSON(out)
+		return nil
+	}
+
+	cfg.Print("Available restores:")
+	cfg.Print("")
+	if len(keys) == 0 {
+		cfg.Print("  (no backups found)")
+		return nil
+	}
+	for _, k := range keys {
+		cfg.Printf("  %s:\n", k)
+		for i, b := range groups[k] {
+			status := "ok"
+			if ok, _ := bm.Verify(b); !ok {
+				status = cfg.Red("CORRUPTED")
+			}
+			newest := ""
+			if i == 0 {
+				newest = " (newest, used by restore)"
+			}
+			cfg.Printf("    %s  %s  %s%s\n", b.Time.Format("2006-01-02 15:04:05"), status, filepath.Base(b.BackupPath), newest)
+		}
+	}
+	return nil
+}
+
+// ownedBy reports whether target is still what dotf installed for ref.
+func ownedBy(target string, ref state.FileRef) bool {
+	ok, _ := removable(target, ref)
+	return ok
+}
+
+// matchAny checks if a string contains any of the provided patterns.
 func matchAny(s string, patterns []string) bool {
 	for _, p := range patterns {
 		if strings.Contains(s, p) {
